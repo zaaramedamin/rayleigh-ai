@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.knowledge.chunking.service import rechunk_all
 from app.knowledge.ingestion.file_types import FILE_TYPES
 from app.knowledge.ingestion.service import IngestSummary, ingest_folders
 from app.storage.database import create_db_engine
@@ -21,6 +22,7 @@ def _print_supported_types() -> None:
 def _print_summary(summary: IngestSummary) -> None:
     print(f"added:                     {summary.added}")
     print(f"unchanged:                 {summary.unchanged}")
+    print(f"chunks created:            {summary.chunks_created}")
     print(f"skipped (empty):           {summary.skipped_empty}")
     print(f"skipped (too large):       {summary.skipped_too_large}")
     print(f"skipped (unsupported):     {summary.skipped_unsupported}")
@@ -43,6 +45,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--list-types", action="store_true", help="show supported file types and exit"
     )
+    parser.add_argument(
+        "--rechunk",
+        action="store_true",
+        help="rebuild chunks for all stored documents using the current chunk settings, then exit",
+    )
     args = parser.parse_args(argv)
 
     if args.list_types:
@@ -52,21 +59,30 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    if not settings.allowed_folders:
+    if not args.rechunk and not settings.allowed_folders:
         print("ALLOWED_FOLDERS is empty. Nothing to ingest. Set it in .env.")
         return 0
 
     engine = create_db_engine(settings.data_dir)
-    if "documents" not in inspect(engine).get_table_names():
+    tables = inspect(engine).get_table_names()
+    if "documents" not in tables or "chunks" not in tables:
         print("Database not initialised. Run `alembic upgrade head` from backend/ first.")
         return 1
 
     with Session(engine) as session:
+        if args.rechunk:
+            total = rechunk_all(
+                session, settings.data_dir, settings.chunk_size_chars, settings.chunk_overlap_chars
+            )
+            print(f"rechunked all stored documents: {total} chunks")
+            return 0
         summary = ingest_folders(
             session,
             settings.data_dir,
             settings.allowed_folders,
             settings.max_file_size_mb * 1024 * 1024,
+            chunk_size=settings.chunk_size_chars,
+            chunk_overlap=settings.chunk_overlap_chars,
         )
     _print_summary(summary)
     return 0

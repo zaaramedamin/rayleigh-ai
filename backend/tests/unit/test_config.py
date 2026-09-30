@@ -15,6 +15,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "MODELS_DIR",
         "ALLOWED_FOLDERS",
         "MAX_FILE_SIZE_MB",
+        "CHUNK_SIZE_CHARS",
+        "CHUNK_OVERLAP_CHARS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -26,6 +28,8 @@ def test_defaults() -> None:
     assert settings.log_level == "INFO"
     assert settings.allowed_folders == []
     assert settings.max_file_size_mb == 5
+    assert settings.chunk_size_chars == 1000
+    assert settings.chunk_overlap_chars == 150
     assert settings.data_dir == (REPO_ROOT / "data").resolve()
     assert settings.models_dir == (REPO_ROOT / "models").resolve()
 
@@ -55,6 +59,28 @@ def test_max_file_size_mb_rejects_invalid_values(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
     monkeypatch.setenv("MAX_FILE_SIZE_MB", value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_chunk_settings_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHUNK_SIZE_CHARS", "500")
+    monkeypatch.setenv("CHUNK_OVERLAP_CHARS", "50")
+
+    settings = Settings(_env_file=None)
+
+    assert (settings.chunk_size_chars, settings.chunk_overlap_chars) == (500, 50)
+
+
+@pytest.mark.parametrize(
+    ("size", "overlap"), [("500", "500"), ("500", "600"), ("50", "10"), ("500", "-1")]
+)
+def test_invalid_chunk_settings_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, size: str, overlap: str
+) -> None:
+    monkeypatch.setenv("CHUNK_SIZE_CHARS", size)
+    monkeypatch.setenv("CHUNK_OVERLAP_CHARS", overlap)
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)

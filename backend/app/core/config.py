@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     allowed_folders: Annotated[list[Path], NoDecode] = []
     # Files larger than this are skipped during ingestion.
     max_file_size_mb: int = Field(default=5, gt=0)
+    # Chunking, in characters. Overlap must be smaller than the chunk size.
+    chunk_size_chars: int = Field(default=1000, ge=100)
+    chunk_overlap_chars: int = Field(default=150, ge=0)
 
     @field_validator("allowed_folders", mode="before")
     @classmethod
@@ -28,6 +31,12 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [part.strip() for part in value.split(",") if part.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _overlap_smaller_than_size(self) -> "Settings":
+        if self.chunk_overlap_chars >= self.chunk_size_chars:
+            raise ValueError("CHUNK_OVERLAP_CHARS must be smaller than CHUNK_SIZE_CHARS")
+        return self
 
     @field_validator("data_dir", "models_dir")
     @classmethod

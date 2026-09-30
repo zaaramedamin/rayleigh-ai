@@ -5,10 +5,12 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app.knowledge.chunking.chunker import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE
+from app.knowledge.chunking.service import chunk_document, has_chunks
 from app.knowledge.ingestion.file_types import extract_text
 from app.knowledge.ingestion.parsers import ParseError
 from app.knowledge.ingestion.scanner import is_within_allowed, resolve_roots, scan_allowed_folders
-from app.storage.files import store_file
+from app.storage.files import UnsafePathError, store_file
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +19,7 @@ logger = logging.getLogger(__name__)
 class IngestSummary:
     added: int = 0
     unchanged: int = 0
+    chunks_created: int = 0
     skipped_empty: int = 0
     skipped_too_large: int = 0
     skipped_unsupported: int = 0
@@ -33,10 +36,14 @@ def ingest_folders(
     data_dir: Path,
     allowed_folders: list[Path],
     max_file_size_bytes: int,
+    *,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> IngestSummary:
-    """Ingest TXT/Markdown files from the allow-listed folders into local storage.
+    """Ingest supported files from the allow-listed folders into local storage and chunk them.
 
-    Re-ingesting unchanged files is a no-op: storage dedupes by content hash.
+    Re-ingesting unchanged files stores nothing new (storage dedupes by content hash). A stored
+    document that has no chunks yet (e.g. ingested before chunking existed) is chunked now.
     """
     summary = IngestSummary()
     scan = scan_allowed_folders(allowed_folders)
@@ -76,16 +83,25 @@ def ingest_folders(
             summary.skipped_empty += 1
             continue
 
-        _, created = store_file(session, data_dir, data, path.name)
+        document, created = store_file(session, data_dir, data, path.name)
         if created:
             summary.added += 1
         else:
             summary.unchanged += 1
 
+        if created or not has_chunks(session, document):
+            try:
+                summary.chunks_created += chunk_document(
+                    session, data_dir, document, chunk_size, chunk_overlap
+                )
+            except (ParseError, UnsafePathError, OSError):
+                summary.failed["chunking"] += 1
+
     logger.info(
-        "ingest finished added=%d unchanged=%d failed=%d",
+        "ingest finished added=%d unchanged=%d chunks=%d failed=%d",
         summary.added,
         summary.unchanged,
+        summary.chunks_created,
         sum(summary.failed.values()),
     )
     return summary

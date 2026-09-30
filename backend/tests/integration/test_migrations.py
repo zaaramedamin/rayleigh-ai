@@ -22,11 +22,15 @@ def _tables(db_path: Path) -> list[str]:
         engine.dispose()
 
 
-def test_upgrade_creates_documents_and_downgrade_removes_it(tmp_path: Path) -> None:
+def test_upgrade_creates_tables_and_downgrade_removes_them(tmp_path: Path) -> None:
     db_path = tmp_path / "test.db"
     config = _config(db_path)
 
     command.upgrade(config, "head")
+    assert {"documents", "chunks"} <= set(_tables(db_path))
+
+    command.downgrade(config, "0001")
+    assert "chunks" not in _tables(db_path)
     assert "documents" in _tables(db_path)
 
     command.downgrade(config, "base")

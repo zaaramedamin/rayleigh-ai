@@ -1,13 +1,13 @@
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.knowledge.ingestion import service
 from app.knowledge.ingestion.scanner import ScanResult
 from app.knowledge.ingestion.service import ingest_folders
-from app.storage.models import Document
+from app.storage.models import Chunk, Document
 
 MAX_BYTES = 1024
 
@@ -182,3 +182,56 @@ def test_summary_reports_unsupported_types_by_extension(
     summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
 
     assert summary.unsupported_by_extension == {".pdf": 1, ".docx": 1}
+
+
+def test_ingestion_creates_chunks_for_new_documents(
+    session: Session, data_dir: Path, allowed: Path
+) -> None:
+    (allowed / "a.md").write_text("# T\n\nbody\n")
+    (allowed / "b.txt").write_text("plain note")
+
+    summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+
+    assert summary.chunks_created == 2
+    assert session.scalar(select(func.count()).select_from(Chunk)) == 2
+
+
+def test_reingesting_does_not_rechunk_or_duplicate_chunks(
+    session: Session, data_dir: Path, allowed: Path
+) -> None:
+    (allowed / "a.md").write_text("# T\n\nbody\n")
+    ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+
+    summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+
+    assert summary.unchanged == 1
+    assert summary.chunks_created == 0
+    assert session.scalar(select(func.count()).select_from(Chunk)) == 1
+
+
+def test_unchanged_document_without_chunks_gets_chunked(
+    session: Session, data_dir: Path, allowed: Path
+) -> None:
+    (allowed / "a.md").write_text("# T\n\nbody\n")
+    ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+    session.execute(delete(Chunk))  # as if ingested before chunking existed
+    session.commit()
+
+    summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+
+    assert summary.unchanged == 1
+    assert summary.chunks_created == 1
+
+
+def test_chunk_settings_are_applied_during_ingestion(
+    session: Session, data_dir: Path, allowed: Path
+) -> None:
+    paragraphs = "\n\n".join(f"paragraph {i} " + "word " * 10 for i in range(20))
+    (allowed / "a.txt").write_text(paragraphs)
+
+    summary = ingest_folders(
+        session, data_dir, [allowed], 10 * MAX_BYTES, chunk_size=200, chunk_overlap=20
+    )
+
+    assert summary.chunks_created > 3
+    assert all(c.char_count <= 200 for c in session.scalars(select(Chunk)))
