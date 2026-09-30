@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     models_dir: Path = Path("models")
     # Allow-list of folders that may be indexed. Empty means nothing can be indexed.
     allowed_folders: Annotated[list[Path], NoDecode] = []
+    # Files larger than this are skipped during ingestion.
+    max_file_size_mb: int = Field(default=5, gt=0)
 
     @field_validator("allowed_folders", mode="before")
     @classmethod

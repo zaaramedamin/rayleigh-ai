@@ -33,7 +33,10 @@ uvicorn app.main:app --reload     # http://127.0.0.1:8000/api/v1/health
 pytest                            # tests
 ruff check . ; ruff format --check .
 alembic upgrade head              # create/update the SQLite database in DATA_DIR
+python -m app.knowledge.ingestion # ingest .txt/.md from ALLOWED_FOLDERS
 ```
+
+Set `ALLOWED_FOLDERS` (comma-separated) and `MAX_FILE_SIZE_MB` in `.env`. Only those folders are ever read.
 
 ## Configuration
 

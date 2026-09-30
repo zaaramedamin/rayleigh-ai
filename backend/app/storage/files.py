@@ -52,11 +52,14 @@ def _write_atomic(target: Path, data: bytes) -> None:
         raise
 
 
-def save_file(session: Session, data_dir: Path, data: bytes, filename: str) -> Document:
+def store_file(
+    session: Session, data_dir: Path, data: bytes, filename: str
+) -> tuple[Document, bool]:
     """Store bytes under a path derived only from their SHA-256 hash and record a Document.
 
-    Saving identical content twice returns the existing Document. The filename is kept as
-    display metadata and never influences where the file is written.
+    Returns (document, created). Saving identical content twice returns the existing Document
+    with created=False. The filename is kept as display metadata and never influences where
+    the file is written.
     """
     content_hash = hashlib.sha256(data).hexdigest()
     stored_path = _stored_path_for(content_hash)
@@ -67,7 +70,7 @@ def save_file(session: Session, data_dir: Path, data: bytes, filename: str) -> D
 
     existing = session.scalar(select(Document).where(Document.content_hash == content_hash))
     if existing is not None:
-        return existing
+        return existing, False
 
     name = display_name(filename)
     document = Document(
@@ -79,7 +82,12 @@ def save_file(session: Session, data_dir: Path, data: bytes, filename: str) -> D
     )
     session.add(document)
     session.commit()
-    return document
+    return document, True
+
+
+def save_file(session: Session, data_dir: Path, data: bytes, filename: str) -> Document:
+    """Like store_file, for callers that don't care whether the document was new."""
+    return store_file(session, data_dir, data, filename)[0]
 
 
 def read_file(data_dir: Path, document: Document) -> bytes:
