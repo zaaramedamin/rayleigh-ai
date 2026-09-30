@@ -11,6 +11,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 # "organisation/model-name", as on Hugging Face. Also used to build a folder name under MODELS_DIR.
 MODEL_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*")
 
+# Upper bound for the number of search results per query.
+MAX_TOP_K = 50
+
 
 class Settings(BaseSettings):
     """Application settings, read from environment variables and the repo-root .env file."""
@@ -30,6 +33,8 @@ class Settings(BaseSettings):
     chunk_overlap_chars: int = Field(default=150, ge=0)
     # Local embedding model (sentence-transformers). Downloaded once into MODELS_DIR.
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # Number of chunks a search returns by default.
+    retrieval_top_k: int = Field(default=5, ge=1, le=MAX_TOP_K)
 
     @field_validator("allowed_folders", mode="before")
     @classmethod

@@ -6,7 +6,7 @@ Everything runs on your machine. No document or query text is sent to a cloud AP
 
 ## Status
 
-Early development. Phases 0 and 1 of the [roadmap](docs/roadmap.md) are done: the API skeleton, database and safe file storage, ingestion of text-based files, and chunking with provenance. Search, embeddings and answers are not built yet.
+Early development. Phases 0–2 of the [roadmap](docs/roadmap.md) are done: API skeleton, database and safe file storage, ingestion of text-based files, chunking with provenance, local embeddings, the vector index, and semantic search with sources. Answering questions with a local LLM (Phase 3) is not built yet.
 
 ## Docs
 
@@ -50,6 +50,7 @@ Set `ALLOWED_FOLDERS` (comma-separated) and `MAX_FILE_SIZE_MB` in `.env`. Only t
 | `rechunk` | Rebuild all chunks after changing chunk settings (then re-indexes them) |
 | `index` | Embed documents that are not searchable yet; `--rebuild` re-embeds everything |
 | `status` | Show documents, chunks, and how many are searchable |
+| `search <question>` | Show the most relevant chunks, with scores and sources (`--top-k`, `--type .md`, `--document ID`) |
 | `types` | List supported file types |
 | `download-model` | Download the embedding model (the only command that uses the internet) |
 
@@ -61,6 +62,24 @@ Each chunk is embedded (turned into a vector) and stored in [Qdrant](https://qdr
 - Each embedding model gets its own collection, so vectors from different models never mix. After changing `EMBEDDING_MODEL`, run `download-model`, then `index`.
 - The vector store only holds ids and filterable metadata. Chunk text and citations always come from the SQLite database.
 - Only one process can open the vector store at a time. If a command says it is in use, stop the API server or wait for the other command.
+
+### Searching
+
+```powershell
+python -m app search how do I cook porridge
+python -m app search train times --top-k 3 --type md
+```
+
+Or through the API (start `uvicorn app.main:app`, then try it at http://127.0.0.1:8000/docs):
+
+```
+POST /api/v1/search
+{"query": "how do I cook porridge", "top_k": 3, "file_types": [".md"], "document_ids": [1, 2]}
+```
+
+Only `query` is required. `top_k` defaults to `RETRIEVAL_TOP_K` (5), up to 50. Each result has a `score` (cosine similarity, higher is closer), the chunk `text`, and its source: file name, heading path, line range, and citation id `<document>:<chunk>`.
+
+Search always returns the closest chunks, even when none is really relevant. In a small test with the default model, relevant matches scored about 0.45–0.75 and unrelated ones below about 0.35. The answering step will use a score threshold, measured by the evaluation step, to say "I don't have enough information" instead of guessing. The query text is never logged.
 
 ### Embedding model
 

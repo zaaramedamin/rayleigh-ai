@@ -22,14 +22,19 @@ def vector_store_path(settings: Settings) -> Path:
     return settings.data_dir / "qdrant"
 
 
+def create_vector_store(settings: Settings, embedder: EmbeddingProvider) -> QdrantVectorStore:
+    """Open the embedded Qdrant store for the embedder's model. The caller must close it."""
+    return QdrantVectorStore.open_local(
+        vector_store_path(settings), collection_name(embedder.model_name), embedder.dimension
+    )
+
+
 @contextmanager
 def open_vector_store(
     settings: Settings, embedder: EmbeddingProvider
 ) -> Iterator[QdrantVectorStore]:
     """Open the embedded Qdrant store for the embedder's model, and always close it again."""
-    store = QdrantVectorStore.open_local(
-        vector_store_path(settings), collection_name(embedder.model_name), embedder.dimension
-    )
+    store = create_vector_store(settings, embedder)
     try:
         yield store
     finally:

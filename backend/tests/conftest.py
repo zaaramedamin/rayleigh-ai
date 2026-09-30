@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -10,6 +11,16 @@ from app.core.config import Settings
 from app.storage.database import Base, create_db_engine, database_url
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging() -> Iterator[None]:
+    """CLI tests configure logging globally; put pytest's handlers back afterwards."""
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    yield
+    root.handlers = handlers
+    root.setLevel(level)
 
 
 @pytest.fixture

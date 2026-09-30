@@ -18,6 +18,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "CHUNK_SIZE_CHARS",
         "CHUNK_OVERLAP_CHARS",
         "EMBEDDING_MODEL",
+        "RETRIEVAL_TOP_K",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -98,6 +99,21 @@ def test_invalid_embedding_model_names_are_rejected(
     monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     monkeypatch.setenv("EMBEDDING_MODEL", name)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_retrieval_top_k_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings(_env_file=None).retrieval_top_k == 5
+
+    monkeypatch.setenv("RETRIEVAL_TOP_K", "12")
+    assert Settings(_env_file=None).retrieval_top_k == 12
+
+
+@pytest.mark.parametrize("value", ["0", "51", "many"])
+def test_invalid_retrieval_top_k_is_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("RETRIEVAL_TOP_K", value)
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)

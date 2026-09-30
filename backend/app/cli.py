@@ -25,6 +25,7 @@ from app.knowledge.indexing.service import (
 )
 from app.knowledge.ingestion.file_types import FILE_TYPES
 from app.knowledge.ingestion.service import IngestSummary, ingest_folders
+from app.knowledge.retrieval.service import RetrievedChunk, retrieve
 from app.storage.database import create_db_engine
 from app.storage.migrations import database_is_up_to_date
 from app.storage.models import Chunk, Document
@@ -177,6 +178,45 @@ def _cmd_status(_args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _print_result(rank: int, result: RetrievedChunk) -> None:
+    heading = f"  [{result.heading_path}]" if result.heading_path else ""
+    print(
+        f"{rank}. score {result.score:.3f}  {result.source}{heading}  "
+        f"lines {result.start_line}-{result.end_line}  (id {result.citation_id})"
+    )
+    snippet = " ".join(result.text.split())
+    print(f"   {snippet[:240]}{'...' if len(snippet) > 240 else ''}")
+
+
+def _cmd_search(args: argparse.Namespace, settings: Settings) -> int:
+    query = " ".join(args.query)
+    engine = _open_engine(settings)
+    embedder = _load_embedder(settings)
+    with Session(engine) as session:
+        try:
+            with open_vector_store(settings, embedder) as store:
+                results = retrieve(
+                    session,
+                    embedder,
+                    store,
+                    query,
+                    top_k=settings.retrieval_top_k if args.top_k is None else args.top_k,
+                    document_ids=args.document,
+                    file_types=args.type,
+                )
+        except (ValueError, VectorStoreError) as exc:
+            raise CliError(str(exc)) from exc
+        pending = count_pending(session, settings.embedding_model)
+
+    if not results:
+        print("no matching notes found")
+    for rank, result in enumerate(results, start=1):
+        _print_result(rank, result)
+    if pending:
+        print(f"note: {pending} document(s) are not indexed yet; run `python -m app index`")
+    return 0
+
+
 def _cmd_download_model(_args: argparse.Namespace, settings: Settings) -> int:
     target = model_dir_for(settings.models_dir, settings.embedding_model)
     if is_model_downloaded(settings.models_dir, settings.embedding_model):
@@ -213,6 +253,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rebuild", action="store_true", help="drop all vectors and re-embed every document"
     )
     add("status", _cmd_status, "show documents, chunks and search index state")
+    search = add("search", _cmd_search, "find the chunks most relevant to a question")
+    search.add_argument("query", nargs="+", help="what to look for (quotes are optional)")
+    search.add_argument("--top-k", type=int, help="number of results (default: RETRIEVAL_TOP_K)")
+    search.add_argument(
+        "--type", action="append", metavar="EXT", help="only this file type, e.g. .md (repeatable)"
+    )
+    search.add_argument(
+        "--document", action="append", type=int, metavar="ID", help="only this document id"
+    )
     add("types", _cmd_types, "list supported file types")
     add("download-model", _cmd_download_model, "download the embedding model (needs internet)")
     return parser

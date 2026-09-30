@@ -206,3 +206,63 @@ def test_index_reports_a_busy_vector_store(
         assert main(["index"], settings=make_settings()) == 1
 
     assert "in use by another process" in capsys.readouterr().err
+
+
+def test_search_prints_ranked_results_with_sources(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    notes: Path,
+    fake_model: HashingEmbedder,
+) -> None:
+    settings = make_settings(allowed_folders=[notes])
+    main(["ingest"], settings=settings)
+    capsys.readouterr()
+
+    assert main(["search", "plain", "note"], settings=settings) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("1. score ")
+    assert "b.txt" in lines[0]
+    assert "lines 1-1" in lines[0]
+    assert lines[1].strip() == "plain note"
+
+
+def test_search_filters_by_file_type(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    notes: Path,
+    fake_model: HashingEmbedder,
+) -> None:
+    settings = make_settings(allowed_folders=[notes])
+    main(["ingest"], settings=settings)
+    capsys.readouterr()
+
+    main(["search", "note", "--type", "md"], settings=settings)
+
+    out = capsys.readouterr().out
+    assert "a.md" in out
+    assert "b.txt" not in out
+
+
+def test_search_on_an_empty_index_says_so(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    fake_model: HashingEmbedder,
+) -> None:
+    assert main(["search", "anything"], settings=make_settings()) == 0
+
+    assert "no matching notes found" in capsys.readouterr().out
+
+
+def test_search_rejects_an_invalid_top_k(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    fake_model: HashingEmbedder,
+) -> None:
+    assert main(["search", "oats", "--top-k", "0"], settings=make_settings()) == 1
+
+    assert "top_k must be between" in capsys.readouterr().err

@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 
 from app import __version__
-from app.api.v1 import health, ingestion
+from app.api.v1 import health, ingestion, search
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 
@@ -17,6 +17,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Reyleight", version=__version__)
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(ingestion.router, prefix="/api/v1")
+    app.include_router(search.router, prefix="/api/v1")
 
     logger.info("app started env=%s", settings.app_env)
     return app
