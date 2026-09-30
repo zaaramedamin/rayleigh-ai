@@ -32,6 +32,7 @@ pip install -e ".[dev]"
 uvicorn app.main:app --reload     # http://127.0.0.1:8000/api/v1/health
 pytest                            # tests
 ruff check . ; ruff format --check .
+alembic upgrade head              # create/update the SQLite database in DATA_DIR
 ```
 
 ## Configuration
