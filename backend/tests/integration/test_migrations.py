@@ -22,12 +22,24 @@ def _tables(db_path: Path) -> list[str]:
         engine.dispose()
 
 
+def _columns(db_path: Path, table: str) -> set[str]:
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+    try:
+        return {column["name"] for column in inspect(engine).get_columns(table)}
+    finally:
+        engine.dispose()
+
+
 def test_upgrade_creates_tables_and_downgrade_removes_them(tmp_path: Path) -> None:
     db_path = tmp_path / "test.db"
     config = _config(db_path)
 
     command.upgrade(config, "head")
     assert {"documents", "chunks"} <= set(_tables(db_path))
+    assert "indexed_model" in _columns(db_path, "documents")
+
+    command.downgrade(config, "0002")
+    assert "indexed_model" not in _columns(db_path, "documents")
 
     command.downgrade(config, "0001")
     assert "chunks" not in _tables(db_path)

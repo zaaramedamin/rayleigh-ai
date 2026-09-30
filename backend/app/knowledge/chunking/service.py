@@ -48,6 +48,7 @@ def chunk_document(
         )
         for piece in pieces
     )
+    document.indexed_model = None  # its vectors no longer match the new chunks
     session.commit()
     return len(pieces)
 

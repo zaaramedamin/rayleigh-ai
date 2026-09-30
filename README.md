@@ -46,10 +46,21 @@ Set `ALLOWED_FOLDERS` (comma-separated) and `MAX_FILE_SIZE_MB` in `.env`. Only t
 
 | Command | What it does |
 |---|---|
-| `ingest` | Ingest and chunk files from `ALLOWED_FOLDERS` |
-| `rechunk` | Rebuild all chunks after changing chunk settings |
+| `ingest` | Ingest, chunk and index files from `ALLOWED_FOLDERS` |
+| `rechunk` | Rebuild all chunks after changing chunk settings (then re-indexes them) |
+| `index` | Embed documents that are not searchable yet; `--rebuild` re-embeds everything |
+| `status` | Show documents, chunks, and how many are searchable |
 | `types` | List supported file types |
 | `download-model` | Download the embedding model (the only command that uses the internet) |
+
+### Search index
+
+Each chunk is embedded (turned into a vector) and stored in [Qdrant](https://qdrant.tech/), which runs embedded inside the app and saves to `DATA_DIR/qdrant`. There is no server or Docker to run.
+
+- `ingest` and `rechunk` index new or changed documents automatically when the model is downloaded; otherwise they say what to run.
+- Each embedding model gets its own collection, so vectors from different models never mix. After changing `EMBEDDING_MODEL`, run `download-model`, then `index`.
+- The vector store only holds ids and filterable metadata. Chunk text and citations always come from the SQLite database.
+- Only one process can open the vector store at a time. If a command says it is in use, stop the API server or wait for the other command.
 
 ### Embedding model
 

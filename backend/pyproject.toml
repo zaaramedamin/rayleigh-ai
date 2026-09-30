@@ -10,6 +10,7 @@ dependencies = [
     "sqlalchemy",
     "alembic",
     "sentence-transformers",
+    "qdrant-client",
 ]
 
 [project.optional-dependencies]

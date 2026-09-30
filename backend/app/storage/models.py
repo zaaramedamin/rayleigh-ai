@@ -24,6 +24,9 @@ class Document(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     media_type: Mapped[str] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Embedding model whose vectors for this document's current chunks are in the vector store.
+    # None means "not searchable yet": never indexed, or re-chunked since.
+    indexed_model: Mapped[str | None] = mapped_column(String(255), default=None)
 
     chunks: Mapped[list["Chunk"]] = relationship(
         back_populates="document", cascade="all, delete-orphan", passive_deletes=True
