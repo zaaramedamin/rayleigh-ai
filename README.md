@@ -19,6 +19,21 @@ Early development. Currently at Phase 0, Step 1: repo skeleton and docs. There i
 
 Python, FastAPI, SQLAlchemy/Alembic, SQLite, Qdrant (local), sentence-transformers, Ollama. React + TypeScript later.
 
+## Running locally
+
+Requires Python 3.11+. From the repo root:
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+
+uvicorn app.main:app --reload     # http://127.0.0.1:8000/api/v1/health
+pytest                            # tests
+ruff check . ; ruff format --check .
+```
+
 ## Configuration
 
 Copy `.env.example` to `.env` and adjust. `.env`, `data/` and `models/` are gitignored.
