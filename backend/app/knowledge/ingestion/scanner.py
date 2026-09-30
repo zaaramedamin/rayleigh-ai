@@ -1,12 +1,15 @@
 import logging
 import os
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.knowledge.ingestion.file_types import file_type_for
+
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = frozenset({".txt", ".md", ".markdown"})
 IGNORED_DIR_NAMES = frozenset({"node_modules", "__pycache__"})
+NO_EXTENSION = "(none)"
 
 
 @dataclass
@@ -15,6 +18,8 @@ class ScanResult:
     folders_missing: int = 0
     skipped_outside_allowlist: int = 0
     skipped_unsupported: int = 0
+    # Extension -> count of skipped files. Extensions only; never file names.
+    unsupported_by_extension: Counter[str] = field(default_factory=Counter)
 
 
 def resolve_roots(allowed_folders: list[Path]) -> list[Path]:
@@ -64,8 +69,9 @@ def scan_allowed_folders(allowed_folders: list[Path]) -> ScanResult:
                 path = Path(dirpath, name)
                 if name.startswith("."):
                     continue
-                if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                if file_type_for(path.suffix) is None:
                     result.skipped_unsupported += 1
+                    result.unsupported_by_extension[path.suffix.lower() or NO_EXTENSION] += 1
                     continue
                 if not is_within_allowed(path, roots):
                     result.skipped_outside_allowlist += 1

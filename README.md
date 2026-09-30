@@ -38,6 +38,22 @@ python -m app.knowledge.ingestion # ingest .txt/.md from ALLOWED_FOLDERS
 
 Set `ALLOWED_FOLDERS` (comma-separated) and `MAX_FILE_SIZE_MB` in `.env`. Only those folders are ever read.
 
+### Supported file types
+
+Run `python -m app.knowledge.ingestion --list-types`, or open `GET /api/v1/ingestion/file-types` in the API docs page. The list lives in `backend/app/knowledge/ingestion/file_types.py`.
+
+| Type | Extensions | Notes |
+|---|---|---|
+| Plain text | `.txt` `.log` | UTF-8 |
+| Markdown | `.md` `.markdown` | Headings kept for chunking |
+| reStructuredText | `.rst` | Read as text |
+| CSV / TSV | `.csv` `.tsv` | Read as text |
+| JSON | `.json` | Must be valid JSON |
+| YAML | `.yaml` `.yml` | Read as text |
+| HTML | `.html` `.htm` | Visible text only; scripts and styles dropped |
+
+Not supported yet: PDF, DOCX and other Office files, images, audio, video. Everything else is skipped and counted by extension in the ingestion summary.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and adjust. `.env`, `data/` and `models/` are gitignored.

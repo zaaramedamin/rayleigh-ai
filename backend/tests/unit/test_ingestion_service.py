@@ -138,3 +138,47 @@ def test_missing_folder_is_reported(session: Session, data_dir: Path, tmp_path: 
     summary = ingest_folders(session, data_dir, [tmp_path / "nope"], MAX_BYTES)
 
     assert summary.folders_missing == 1
+
+
+def test_ingests_text_like_formats(session: Session, data_dir: Path, allowed: Path) -> None:
+    (allowed / "food.csv").write_text("name,kcal\noats,389\n")
+    (allowed / "meta.json").write_text('{"a": 1}')
+    (allowed / "page.html").write_text("<p>hello</p>")
+    (allowed / "conf.yaml").write_text("key: value\n")
+
+    summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+
+    assert summary.added == 4
+    assert not summary.failed
+
+
+def test_invalid_json_fails_with_reason(session: Session, data_dir: Path, allowed: Path) -> None:
+    (allowed / "broken.json").write_text('{"a": ')
+
+    summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+
+    assert summary.failed == {"invalid_json": 1}
+    assert _doc_count(session) == 0
+
+
+def test_files_with_no_extractable_text_are_skipped_as_empty(
+    session: Session, data_dir: Path, allowed: Path
+) -> None:
+    (allowed / "blank.txt").write_text("   \n\n  ")
+    (allowed / "scripts_only.html").write_text("<script>var x = 1</script>")
+
+    summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+
+    assert summary.skipped_empty == 2
+    assert _doc_count(session) == 0
+
+
+def test_summary_reports_unsupported_types_by_extension(
+    session: Session, data_dir: Path, allowed: Path
+) -> None:
+    (allowed / "a.pdf").write_bytes(b"%PDF")
+    (allowed / "b.docx").write_bytes(b"PK")
+
+    summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+
+    assert summary.unsupported_by_extension == {".pdf": 1, ".docx": 1}

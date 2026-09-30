@@ -5,7 +5,7 @@ The MVP is a working, evaluated, fully offline RAG loop over the owner's own not
 ## Functional requirements
 
 1. Index only folders on an explicit allow-list.
-2. Ingest TXT and Markdown first. PDF and DOCX are added once that pipeline is proven.
+2. Ingest text-based formats (TXT, Markdown, CSV, JSON, YAML, HTML and similar; the authoritative list is in the README). PDF and DOCX are added once that pipeline is proven, each as its own slice.
 3. Split documents into chunks that keep provenance: source file, page or heading, chunk id.
 4. Embed chunks locally behind a swappable `EmbeddingProvider` interface.
 5. Store vectors in a local Qdrant instance behind a `VectorStore` interface.

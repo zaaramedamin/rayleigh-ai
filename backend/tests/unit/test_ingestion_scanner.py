@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from app.knowledge.ingestion.file_types import supported_extensions
 from app.knowledge.ingestion.scanner import is_within_allowed, resolve_roots, scan_allowed_folders
 
 
@@ -144,3 +145,24 @@ def test_nested_allow_list_entries_do_not_duplicate_files(allowed: Path) -> None
     result = scan_allowed_folders([allowed, allowed / "sub"])
 
     assert len(result.files) == 1
+
+
+def test_unsupported_files_are_counted_by_extension(allowed: Path) -> None:
+    for name in ("a.pdf", "b.PDF", "c.exe", "README"):
+        (allowed / name).write_text("x")
+    (allowed / "ok.csv").write_text("a,b")
+
+    result = scan_allowed_folders([allowed])
+
+    assert _names(result.files) == {"ok.csv"}
+    assert result.unsupported_by_extension == {".pdf": 2, ".exe": 1, "(none)": 1}
+    assert result.skipped_unsupported == 4
+
+
+def test_all_registered_types_are_found(allowed: Path) -> None:
+    for extension in supported_extensions():
+        (allowed / f"file{extension}").write_text("x")
+
+    result = scan_allowed_folders([allowed])
+
+    assert len(result.files) == len(supported_extensions())

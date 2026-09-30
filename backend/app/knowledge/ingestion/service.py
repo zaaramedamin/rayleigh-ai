@@ -5,7 +5,8 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.knowledge.ingestion.parsers import ParseError, parse_text
+from app.knowledge.ingestion.file_types import extract_text
+from app.knowledge.ingestion.parsers import ParseError
 from app.knowledge.ingestion.scanner import is_within_allowed, resolve_roots, scan_allowed_folders
 from app.storage.files import store_file
 
@@ -20,6 +21,8 @@ class IngestSummary:
     skipped_too_large: int = 0
     skipped_unsupported: int = 0
     skipped_outside_allowlist: int = 0
+    # Extension -> count, for files skipped as an unsupported type.
+    unsupported_by_extension: Counter[str] = field(default_factory=Counter)
     folders_missing: int = 0
     # Failure reason code -> count. Reasons never include file names or contents.
     failed: Counter[str] = field(default_factory=Counter)
@@ -39,6 +42,7 @@ def ingest_folders(
     scan = scan_allowed_folders(allowed_folders)
     summary.folders_missing = scan.folders_missing
     summary.skipped_unsupported = scan.skipped_unsupported
+    summary.unsupported_by_extension = scan.unsupported_by_extension
     summary.skipped_outside_allowlist = scan.skipped_outside_allowlist
 
     roots = resolve_roots(allowed_folders)
@@ -63,9 +67,13 @@ def ingest_folders(
             continue
 
         try:
-            parse_text(data)
+            text = extract_text(path.suffix, data)
         except ParseError as exc:
             summary.failed[str(exc)] += 1
+            continue
+        if not text.strip():
+            # e.g. a whitespace-only note, or an HTML page with no visible text
+            summary.skipped_empty += 1
             continue
 
         _, created = store_file(session, data_dir, data, path.name)
