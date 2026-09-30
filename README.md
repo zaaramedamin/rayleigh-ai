@@ -29,15 +29,33 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 
-uvicorn app.main:app --reload     # http://127.0.0.1:8000/api/v1/health
+alembic upgrade head              # create/update the SQLite database in DATA_DIR
+python -m app download-model      # one time: download the embedding model into MODELS_DIR
+python -m app ingest              # ingest supported files from ALLOWED_FOLDERS, and chunk them
+
+uvicorn app.main:app --reload     # API on http://127.0.0.1:8000 (docs at /docs)
 pytest                            # tests
 ruff check . ; ruff format --check .
-alembic upgrade head              # create/update the SQLite database in DATA_DIR
-python -m app.knowledge.ingestion # ingest supported files from ALLOWED_FOLDERS, and chunk them
-python -m app.knowledge.ingestion --rechunk   # rebuild all chunks after changing chunk settings
 ```
 
 Set `ALLOWED_FOLDERS` (comma-separated) and `MAX_FILE_SIZE_MB` in `.env`. Only those folders are ever read.
+
+### Commands
+
+`python -m app <command>` (add `--help` to any command for details):
+
+| Command | What it does |
+|---|---|
+| `ingest` | Ingest and chunk files from `ALLOWED_FOLDERS` |
+| `rechunk` | Rebuild all chunks after changing chunk settings |
+| `types` | List supported file types |
+| `download-model` | Download the embedding model (the only command that uses the internet) |
+
+### Embedding model
+
+Embeddings run locally with [sentence-transformers](https://www.sbert.net/). The model is set by `EMBEDDING_MODEL` (default `sentence-transformers/all-MiniLM-L6-v2`, about 90 MB, English). `download-model` saves it under `MODELS_DIR`. After that, the model is always loaded from that folder with the Hugging Face libraries forced offline, and code shipped with models is never run.
+
+For notes in French or several languages, `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` is a multilingual alternative (about 470 MB). Change `EMBEDDING_MODEL`, then run `download-model` again.
 
 ### Supported file types
 

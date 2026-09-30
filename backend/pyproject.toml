@@ -9,6 +9,7 @@ dependencies = [
     "pydantic-settings",
     "sqlalchemy",
     "alembic",
+    "sentence-transformers",
 ]
 
 [project.optional-dependencies]

@@ -21,9 +21,23 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(entry)
 
 
+# Third-party loggers that are chatty at INFO (per-request HTTP lines, model-loading notes).
+_QUIET_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "filelock",
+    "huggingface_hub",
+    "transformers",
+    "sentence_transformers",
+)
+
+
 def configure_logging(level: str = "INFO") -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(level.upper())
+    for name in _QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)

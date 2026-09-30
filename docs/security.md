@@ -10,6 +10,13 @@
 6. **Safe file handling.** Uploaded filenames are metadata only, never paths. Stored files use hashed paths.
 7. **No secrets in git.** `.env`, `data/`, `models/` and database files are gitignored from the start.
 
+## Network access
+
+- The only command that uses the internet is `python -m app download-model`, run explicitly by the owner. It downloads the embedding model into `MODELS_DIR`.
+- At runtime the model is loaded from that folder only. The Hugging Face libraries are switched to offline mode, so an accidental download attempt fails instead of reaching the network.
+- `trust_remote_code` is always off: code shipped inside a model repository is never executed.
+- The API server listens on `127.0.0.1` (the uvicorn default). Do not start it with `--host 0.0.0.0`.
+
 ## Threats to keep in mind
 
 - Path traversal through filenames.

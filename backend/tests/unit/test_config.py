@@ -17,6 +17,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "MAX_FILE_SIZE_MB",
         "CHUNK_SIZE_CHARS",
         "CHUNK_OVERLAP_CHARS",
+        "EMBEDDING_MODEL",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -81,6 +82,22 @@ def test_invalid_chunk_settings_are_rejected(
 ) -> None:
     monkeypatch.setenv("CHUNK_SIZE_CHARS", size)
     monkeypatch.setenv("CHUNK_OVERLAP_CHARS", overlap)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_default_embedding_model() -> None:
+    assert Settings(_env_file=None).embedding_model == "sentence-transformers/all-MiniLM-L6-v2"
+
+
+@pytest.mark.parametrize(
+    "name", ["", "all-MiniLM-L6-v2", "a/b/c", "../evil", "a/..", "a b/c", r"a/b\..\c", "/abs"]
+)
+def test_invalid_embedding_model_names_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv("EMBEDDING_MODEL", name)
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
