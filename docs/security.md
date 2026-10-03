@@ -17,6 +17,12 @@
 - `trust_remote_code` is always off: code shipped inside a model repository is never executed.
 - The API server listens on `127.0.0.1` (the uvicorn default). Do not start it with `--host 0.0.0.0`.
 
+## Verifying it offline
+
+- `python -m app offline-check` runs the whole pipeline with every non-local network connection blocked, after proving the block works, and reports each attempt it refused. `python -m app --offline <command>` does the same for any command.
+- It watches Python's networking, so for the strongest proof also run it with the network switched off. The steps are in [offline-check.md](offline-check.md).
+- The evaluation (`python -m app eval`) uses made-up notes in a temporary library and never reads your own data.
+
 ## Answering and prompt injection
 
 - Notes are untrusted data. They are passed to the model only in the user message, as numbered notes inside delimiters containing a random per-request value, so a note cannot forge its own boundaries.

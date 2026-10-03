@@ -143,7 +143,7 @@ Only chunks scoring at least `ANSWER_MIN_SCORE` (default 0.30) continue. **If no
 
 The chunks that pass are ordered best first, up to about 6,000 characters in total. This keeps the prompt small enough for a 4-billion-parameter model.
 
-> The 0.30 is a starting guess. In small tests, relevant matches scored about 0.4 to 0.8 and unrelated ones came in below about 0.35. Step 11 (the evaluation set) is where it gets tuned properly.
+> The score alone cannot tell "answerable" from "unanswerable". In the evaluation, answerable questions scored 0.42 to 0.83, and unanswerable ones 0.11 to 0.69: a question about the *office* wifi password scores high against a note about the *guest* wifi password. So 0.30 is set low on purpose. It keeps every answerable question and only stops clearly unrelated ones, and the model's own `INSUFFICIENT` check catches the rest. Raising it would mostly refuse real questions. See [evaluation.md](evaluation.md).
 
 ### B5. Build the prompt
 
@@ -283,6 +283,8 @@ Run `python -m app --help` for the list.
 | `search <words>` | B1–B3: show the closest chunks and scores |
 | `ask <question>` | B1–B7: a cited answer or a refusal |
 | `check-llm` | Test that Ollama answers |
+| `eval` | Measure quality on a built-in test set (never touches your data) |
+| `offline-check` | Prove nothing leaves your computer during a full run |
 | `download-model` | The only command that uses the internet |
 | `types` | List supported file types |
 
@@ -310,7 +312,7 @@ Models and the vector store sit behind small interfaces (`EmbeddingProvider`, `V
 
 ## 10. Honest limits
 
-- **Answer quality is unmeasured.** Nothing yet checks the 0.30 gate or the chunk size against real questions. That is Step 11.
+- **Quality is measured, but on a small set.** `python -m app eval` checks 37 questions on 12 made-up notes: 24 of 26 answerable questions were answered correctly, and all unanswerable ones were refused. That is a smoke alarm, not a precise score, and it cannot tell you the best chunk size for your own much larger notes. See [evaluation.md](evaluation.md).
 - **A 4-billion-parameter model makes mistakes.** The citations are there so you can check an answer against the note.
 - **Supported types are text-based only.** No PDF, DOCX, images or audio yet.
 - **No deletion or version tracking.** Removed and edited files leave older copies behind.

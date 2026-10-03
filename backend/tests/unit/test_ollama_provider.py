@@ -193,6 +193,24 @@ def test_empty_answers_are_errors(ollama: FakeOllama, content: str) -> None:
         _provider(ollama).generate("s", "u")
 
 
+def test_running_out_of_budget_while_reasoning_is_explained(ollama: FakeOllama) -> None:
+    ollama.respond = lambda _p, _b: (
+        200,
+        {**_chat("", thinking="long reasoning ..."), "done_reason": "length"},
+    )
+
+    with pytest.raises(LLMError, match="LLM_THINK=false"):
+        _provider(ollama, think=True).generate("s", "u")
+
+
+def test_running_out_of_budget_without_reasoning_is_reported_plainly(ollama: FakeOllama) -> None:
+    ollama.respond = lambda _p, _b: (200, {**_chat(""), "done_reason": "length"})
+
+    with pytest.raises(LLMError, match="answer budget") as raised:
+        _provider(ollama, think=False).generate("s", "u")
+    assert "LLM_THINK" not in str(raised.value)
+
+
 def test_redirects_are_refused_so_the_prompt_goes_nowhere_else(ollama: FakeOllama) -> None:
     elsewhere = FakeOllama()
     try:

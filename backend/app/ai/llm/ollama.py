@@ -146,6 +146,11 @@ class OllamaProvider:
             raise LLMError("Ollama returned a response without a message")
         content = _THINK_BLOCK.sub("", content).strip()
         if not content:
+            if data.get("done_reason") == "length":
+                raise LLMError(
+                    "the model used up its whole answer budget before writing an answer"
+                    + (" while reasoning; set LLM_THINK=false" if self._think else "")
+                )
             raise LLMError("the model returned an empty answer")
         # Log timing and sizes only, never the prompt or the answer.
         logger.info(

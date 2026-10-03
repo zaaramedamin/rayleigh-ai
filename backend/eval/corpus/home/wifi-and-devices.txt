@@ -1,0 +1,9 @@
+Home network notes
+
+The guest wifi password is mango-42. The main network is for family devices only and its
+password is written inside the router cabinet.
+
+The router admin page is at 192.168.1.1. Change the admin password every year.
+
+The printer is a Brother laser printer. It connects to the main network, not the guest one.
+Replace the toner when the display shows a low-toner warning.

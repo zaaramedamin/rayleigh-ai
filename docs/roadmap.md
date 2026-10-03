@@ -23,8 +23,8 @@ Work proceeds one small, tested slice at a time. Before each step, its slice and
 10. **End-to-end RAG.** Grounded answers with citations, an explicit refusal on weak evidence, and injection-resistant prompting.
 
 ### Phase 4: Proof
-11. **Evaluation set.** Answerable and unanswerable questions with a scoring script.
-12. **Offline verification.** Full pipeline works with the network disconnected.
+11. **Evaluation set.** Answerable and unanswerable questions with a scoring script. **Done:** 37 questions over 12 notes, `python -m app eval`; see [evaluation.md](evaluation.md).
+12. **Offline verification.** Full pipeline works with the network disconnected. **Done:** `python -m app offline-check` and `--offline`, plus the manual steps in [offline-check.md](offline-check.md).
 
 ## Future direction (not started; only on explicit request)
 

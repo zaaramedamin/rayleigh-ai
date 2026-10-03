@@ -1,0 +1,17 @@
+{
+  "week": "March, week 2",
+  "weekly_food_budget_eur": 55,
+  "daily_protein_target_g": 110,
+  "days": {
+    "monday": {
+      "breakfast": "porridge with banana",
+      "lunch": "lentil soup",
+      "dinner": "chicken and rice"
+    },
+    "tuesday": {
+      "breakfast": "overnight oats",
+      "lunch": "egg salad sandwich",
+      "dinner": "salmon with potatoes"
+    }
+  }
+}

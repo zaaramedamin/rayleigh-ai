@@ -1,9 +1,13 @@
 """Command-line interface: `python -m app <command>`. Run `python -m app --help` for the list."""
 
 import argparse
+import json
+import os
+import socket
 import sys
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from pydantic import ValidationError
 from sqlalchemy import Engine, func, select
@@ -19,6 +23,10 @@ from app.ai.embeddings.base import (
 from app.ai.llm.base import LLMError, LLMUnavailableError
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
+from app.evaluation.dataset import DatasetError, load_dataset
+from app.evaluation.network_guard import NetworkBlocked, NetworkGuard
+from app.evaluation.report import format_report, to_dict
+from app.evaluation.runner import hit_rate, run_evaluation
 from app.knowledge.answering.service import Answer, compose_answer
 from app.knowledge.chunking.service import rechunk_all
 from app.knowledge.components import (
@@ -301,6 +309,129 @@ def _cmd_ask(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _evaluation_inputs(args: argparse.Namespace, settings: Settings) -> tuple[int, int, int, float]:
+    chunk_size = args.chunk_size or settings.chunk_size_chars
+    chunk_overlap = (
+        settings.chunk_overlap_chars if args.chunk_overlap is None else args.chunk_overlap
+    )
+    top_k = args.top_k or settings.retrieval_top_k
+    min_score = settings.answer_min_score if args.min_score is None else args.min_score
+    if chunk_size < 100:
+        raise CliError("--chunk-size must be at least 100")
+    if not 0 <= chunk_overlap < chunk_size:
+        raise CliError("--chunk-overlap must be at least 0 and smaller than the chunk size")
+    if not 1 <= top_k <= 50:
+        raise CliError("--top-k must be between 1 and 50")
+    if not 0.0 <= min_score <= 1.0:
+        raise CliError("--min-score must be between 0 and 1")
+    return chunk_size, chunk_overlap, top_k, min_score
+
+
+def _cmd_eval(args: argparse.Namespace, settings: Settings) -> int:
+    chunk_size, chunk_overlap, top_k, min_score = _evaluation_inputs(args, settings)
+    try:
+        dataset = load_dataset()
+    except DatasetError as exc:
+        raise CliError(f"evaluation set problem: {exc}") from exc
+    embedder = _load_embedder(settings)
+
+    llm = None
+    if args.answers:
+        llm = create_llm(settings)
+        try:
+            llm.list_models()  # fail early, with a clear message, if Ollama is not running
+        except LLMError as exc:
+            raise CliError(str(exc)) from exc
+
+    note = " and answers (this takes a few minutes)" if llm else ""
+    print(f"evaluating retrieval{note} on the built-in test set ...", file=sys.stderr, flush=True)
+    try:
+        run = run_evaluation(
+            embedder,
+            dataset,
+            llm=llm,
+            top_k=top_k,
+            min_score=min_score,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+    except (ValueError, VectorStoreError) as exc:
+        raise CliError(str(exc)) from exc
+
+    print(format_report(run))
+    if args.output:
+        path = Path(args.output)
+        path.write_text(json.dumps(to_dict(run), indent=2), encoding="utf-8")
+        print(f"\nfull results written to {path}")
+    return 0
+
+
+def _cmd_offline_check(_args: argparse.Namespace, settings: Settings) -> int:
+    """Run the whole pipeline with all non-local network access blocked, and report the result."""
+    try:
+        dataset = load_dataset()
+    except DatasetError as exc:
+        raise CliError(f"evaluation set problem: {exc}") from exc
+
+    guard = NetworkGuard()
+    print("OFFLINE CHECK")
+    with guard:
+        # The guard must really be on: reaching a public test address has to be refused.
+        try:
+            socket.create_connection(("203.0.113.1", 80), timeout=1).close()
+            raise CliError("the network guard did not engage; cannot prove anything")
+        except NetworkBlocked:
+            print("  network guard self-test: a connection to 203.0.113.1 was refused (OK)")
+        except OSError as exc:
+            raise CliError(f"the network guard did not engage ({exc})") from exc
+        guard.blocked.clear()
+        guard.local.clear()
+
+        embedder = _load_embedder(settings)
+        flags = ", ".join(
+            f"{k}={os.environ.get(k, 'unset')}" for k in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+        )
+        print(f"  embedding model loaded from disk ({flags})")
+
+        llm = create_llm(settings)
+        try:
+            llm.list_models()
+        except LLMError as exc:
+            raise CliError(str(exc)) from exc
+
+        smoke = {q.id for q in dataset.questions if q.smoke}
+        run = run_evaluation(
+            embedder,
+            dataset,
+            llm=llm,
+            top_k=settings.retrieval_top_k,
+            min_score=settings.answer_min_score,
+            chunk_size=settings.chunk_size_chars,
+            chunk_overlap=settings.chunk_overlap_chars,
+            answer_ids=smoke,
+        )
+
+    passed = sum(a.passed for a in run.answers)
+    print(f"  corpus ingested and indexed: {run.documents} documents, {run.chunks} chunks")
+    print(
+        f"  searched {len(run.retrieval)} questions "
+        f"(right note in the top {run.top_k} for {hit_rate(run.retrieval, run.top_k) * 100:.0f}%)"
+    )
+    print(
+        f"  answered {len(run.answers)} questions with {run.llm_model} "
+        f"({passed} correct, informational only)"
+    )
+    for line in guard.summary().splitlines():
+        print(f"  {line}")
+    if guard.blocked:
+        print("  RESULT: FAIL - something tried to reach outside this computer.")
+        return 1
+    print("  RESULT: PASS - nothing tried to reach outside this computer.")
+    print("  (This watches Python. For the strongest proof, also run it with Wi-Fi off:")
+    print("   see docs/offline-check.md.)")
+    return 0
+
+
 def _cmd_download_model(_args: argparse.Namespace, settings: Settings) -> int:
     target = model_dir_for(settings.models_dir, settings.embedding_model)
     if is_model_downloaded(settings.models_dir, settings.embedding_model):
@@ -323,6 +454,11 @@ def _cmd_download_model(_args: argparse.Namespace, settings: Settings) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m app", description="Reyleight command line.")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="run the command with all non-local network access blocked, and report any attempt",
+    )
     commands = parser.add_subparsers(dest="command", required=True, metavar="<command>")
 
     def add(name: str, handler: Handler, help_text: str) -> argparse.ArgumentParser:
@@ -356,6 +492,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--document", action="append", type=int, metavar="ID", help="only this document id"
     )
     add("check-llm", _cmd_check_llm, "send a test prompt to the local LLM (Ollama)")
+    evaluate = add("eval", _cmd_eval, "measure retrieval and answer quality on a built-in test set")
+    evaluate.add_argument("--answers", action="store_true", help="also test answers (uses the LLM)")
+    evaluate.add_argument("--top-k", type=int, help="notes retrieved per question")
+    evaluate.add_argument("--chunk-size", type=int, help="try another chunk size (characters)")
+    evaluate.add_argument("--chunk-overlap", type=int, help="try another chunk overlap")
+    evaluate.add_argument("--min-score", type=float, help="try another ANSWER_MIN_SCORE")
+    evaluate.add_argument("--output", metavar="FILE", help="also write full results as JSON")
+    add("offline-check", _cmd_offline_check, "run the pipeline with all non-local network blocked")
     add("types", _cmd_types, "list supported file types")
     add("download-model", _cmd_download_model, "download the embedding model (needs internet)")
     return parser
@@ -376,8 +520,18 @@ def main(argv: list[str] | None = None, settings: Settings | None = None) -> int
             print(f"  {name}: {problem['msg']}", file=sys.stderr)
         return 1
     configure_logging(settings.log_level)
-    try:
-        return args.handler(args, settings)
-    except CliError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+
+    def run() -> int:
+        try:
+            return args.handler(args, settings)
+        except CliError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    if not args.offline:
+        return run()
+    guard = NetworkGuard()
+    with guard:
+        code = run()
+    print(guard.summary(), file=sys.stderr)
+    return 1 if guard.blocked and code == 0 else code

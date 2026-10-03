@@ -6,11 +6,13 @@ Everything runs on your machine. No document or query text is sent to a cloud AP
 
 ## Status
 
-Early development. Phases 0–3 of the [roadmap](docs/roadmap.md) are done: API skeleton, database and safe file storage, ingestion of text-based files, chunking with provenance, local embeddings, the vector index, semantic search, and cited answers from a local LLM. Still to do: the evaluation set (Phase 4, Step 11) and the offline verification (Step 12).
+Early development. Phases 0–3 of the [roadmap](docs/roadmap.md) are done: API skeleton, database and safe file storage, ingestion of text-based files, chunking with provenance, local embeddings, the vector index, semantic search, and cited answers from a local LLM. Phase 4 is done too: a built-in evaluation set measures quality, and an offline check proves nothing leaves your computer. All 12 steps of the MVP roadmap are complete.
 
 ## Docs
 
 - [How it works](docs/how-it-works.md): what happens to your notes, step by step
+- [Evaluation](docs/evaluation.md): how quality is measured, and the results
+- [Offline check](docs/offline-check.md): proving nothing leaves your computer
 - [Vision](docs/vision.md): what this is and why
 - [Requirements](docs/requirements.md): MVP scope and acceptance criteria
 - [Security](docs/security.md): privacy and safety principles
@@ -54,6 +56,8 @@ Set `ALLOWED_FOLDERS` (comma-separated) and `MAX_FILE_SIZE_MB` in `.env`. Only t
 | `search <question>` | Show the most relevant chunks, with scores and sources (`--top-k`, `--type .md`, `--document ID`) |
 | `ask <question>` | Answer a question from your notes, with citations (`--top-k`, `--type`, `--document`) |
 | `check-llm` | Send a test prompt to the local LLM (Ollama) |
+| `eval` | Measure retrieval and answer quality on a built-in test set (`--answers`, `--chunk-size`, `--min-score`, `--output`) |
+| `offline-check` | Run the whole pipeline with all non-local network access blocked, and report any attempt |
 | `types` | List supported file types |
 | `download-model` | Download the embedding model (the only command that uses the internet) |
 
@@ -97,7 +101,24 @@ How an answer is made, and why you can trust the sources:
 3. **The model can decline.** If the notes are related but don't contain the answer, the model replies `INSUFFICIENT` and you get the same refusal.
 4. **Citations are checked by the app.** The model cites notes by number, and the app maps numbers to real sources from the database. Numbers the model invents are removed. If an answer has no valid citation, it is not shown.
 
-`reason` is one of `answered`, `no_relevant_notes`, `model_declined`, `no_valid_citation`. `ANSWER_MIN_SCORE` is a starting value; the evaluation set (next step) is how it gets tuned. A 4B-parameter local model can still make mistakes, so use the citations to check the answer against your note.
+`reason` is one of `answered`, `no_relevant_notes`, `model_declined`, `no_valid_citation`. `ANSWER_MIN_SCORE` was checked with the evaluation set (see [Measuring quality](#measuring-quality)). A 4B-parameter local model can still make mistakes, so use the citations to check the answer against your note.
+
+### Measuring quality
+
+```powershell
+python -m app eval --answers
+```
+
+Runs 37 questions with known answers (some answerable, some not, one with a hidden instruction) against 12 made-up notes, in a throwaway library that never touches your data. Measured on 2026-10-03: the right note ranked first for 27 of 27 questions, 24 of 26 answerable questions were answered correctly with a valid citation, 10 of 10 unanswerable ones were refused, and the hidden instruction was ignored. The two wrong answers were mistakes by the small model. Details, how to read the report and how to add your own questions: [docs/evaluation.md](docs/evaluation.md).
+
+### Proving it works offline
+
+```powershell
+python -m app offline-check             # whole pipeline, with all non-local network blocked
+python -m app --offline ask <question>  # any command, same guard, on your own notes
+```
+
+Both report how many outbound connection attempts were blocked (it should be 0). See [docs/offline-check.md](docs/offline-check.md), which also gives the stronger check with the network physically switched off.
 
 ### Searching
 
@@ -115,7 +136,7 @@ POST /api/v1/search
 
 Only `query` is required. `top_k` defaults to `RETRIEVAL_TOP_K` (5), up to 50. Each result has a `score` (cosine similarity, higher is closer), the chunk `text`, and its source: file name, heading path, line range, and citation id `<document>:<chunk>`.
 
-Search always returns the closest chunks, even when none is really relevant. In a small test with the default model, relevant matches scored about 0.45–0.75 and unrelated ones below about 0.35. The answering step will use a score threshold, measured by the evaluation step, to say "I don't have enough information" instead of guessing. The query text is never logged.
+Search always returns the closest chunks, even when none is really relevant. A low score means a weak match, but a high score does not prove the answer is there: in the evaluation, questions on a related topic that the notes cannot answer scored as high as real answers. That is why `ask` also lets the model decline. The query text is never logged.
 
 ### Embedding model
 

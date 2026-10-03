@@ -43,3 +43,18 @@ def real_embedding_model_problem() -> str | None:
     except ImportError as exc:
         return f"embedding library cannot be loaded here: {exc}"
     return None
+
+
+def ollama_problem() -> str | None:
+    """Why tests against the real local LLM cannot run here, or None if they can."""
+    from app.ai.llm.base import LLMError
+    from app.core.config import get_settings
+    from app.knowledge.components import create_llm
+
+    settings = get_settings()
+    try:
+        installed = create_llm(settings, timeout_seconds=3).list_models()
+    except LLMError:
+        return "Ollama is not running"
+    wanted = settings.llm_model if ":" in settings.llm_model else f"{settings.llm_model}:latest"
+    return None if wanted in installed else f"model {settings.llm_model} is not installed"

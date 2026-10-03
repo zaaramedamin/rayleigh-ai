@@ -412,3 +412,171 @@ def test_ask_without_the_embedding_model_explains_what_to_do(
     assert main(["ask", "anything"], settings=make_settings()) == 1
 
     assert "download-model" in capsys.readouterr().err
+
+
+# --- eval and offline checks ------------------------------------------------------------------
+
+
+def test_eval_prints_retrieval_and_gate_sections(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings, fake_model: HashingEmbedder
+) -> None:
+    assert main(["eval"], settings=make_settings()) == 0
+
+    out = capsys.readouterr().out
+    assert "EVALUATION" in out
+    assert "corpus: 12 documents" in out
+    assert "RETRIEVAL" in out
+    assert "RELEVANCE GATE" in out
+    assert "ANSWERS" not in out
+
+
+def test_eval_with_answers_checks_them_and_writes_json(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    fake_model: HashingEmbedder,
+    fake_llm: FakeLLM,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "results.json"
+
+    assert main(["eval", "--answers", "--output", str(output)], settings=make_settings()) == 0
+
+    out = capsys.readouterr().out
+    assert "ANSWERS" in out
+    assert "unanswerable" in out
+    assert fake_llm.calls  # the model was asked about at least one question
+    import json
+
+    assert json.loads(output.read_text(encoding="utf-8"))["corpus"]["documents"] == 12
+    assert f"written to {output}" in out
+
+
+def test_eval_accepts_experiment_settings(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings, fake_model: HashingEmbedder
+) -> None:
+    assert (
+        main(
+            ["eval", "--chunk-size", "300", "--chunk-overlap", "30", "--top-k", "3"],
+            settings=make_settings(),
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "chunk size 300, overlap 30, top_k 3" in out
+
+
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (["--chunk-size", "50"], "at least 100"),
+        (["--chunk-size", "200", "--chunk-overlap", "200"], "smaller than the chunk size"),
+        (["--top-k", "99"], "between 1 and 50"),
+        (["--min-score", "1.5"], "between 0 and 1"),
+    ],
+)
+def test_eval_rejects_bad_experiment_settings(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    fake_model: HashingEmbedder,
+    flags: list[str],
+    message: str,
+) -> None:
+    assert main(["eval", *flags], settings=make_settings()) == 1
+
+    assert message in capsys.readouterr().err
+
+
+def test_eval_answers_needs_a_running_llm(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    fake_model: HashingEmbedder,
+    fake_llm: FakeLLM,
+) -> None:
+    fake_llm.error = LLMUnavailableError("Ollama is not reachable; run `ollama serve`")
+
+    assert main(["eval", "--answers"], settings=make_settings()) == 1
+
+    assert "ollama serve" in capsys.readouterr().err
+
+
+def test_eval_without_the_embedding_model_explains_what_to_do(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings
+) -> None:
+    assert main(["eval"], settings=make_settings()) == 1
+
+    assert "download-model" in capsys.readouterr().err
+
+
+def test_eval_never_touches_the_users_data_folder(
+    make_settings: MakeSettings, fake_model: HashingEmbedder, data_dir: Path
+) -> None:
+    main(["eval"], settings=make_settings())
+
+    assert not data_dir.exists()
+
+
+def test_offline_check_passes_when_nothing_leaves_the_machine(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings, fake_model: HashingEmbedder
+) -> None:
+    assert main(["offline-check"], settings=make_settings()) == 0
+
+    out = capsys.readouterr().out
+    assert "network guard self-test" in out
+    assert "outbound connection attempts blocked: 0" in out
+    assert "RESULT: PASS" in out
+
+
+def test_offline_check_fails_if_the_pipeline_tries_to_reach_outside(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    fake_model: HashingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import socket
+
+    real_run = cli.run_evaluation
+
+    def leaky(*args: object, **kwargs: object) -> object:
+        try:
+            socket.create_connection(("203.0.113.5", 443), timeout=1)
+        except OSError:
+            pass  # a careless library swallowing the failure must still be reported
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "run_evaluation", leaky)
+
+    assert main(["offline-check"], settings=make_settings()) == 1
+
+    out = capsys.readouterr().out
+    assert "203.0.113.5:443" in out
+    assert "RESULT: FAIL" in out
+
+
+def test_the_offline_flag_wraps_any_command_and_reports(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings
+) -> None:
+    assert main(["--offline", "types"], settings=make_settings()) == 0
+
+    assert "outbound connection attempts blocked: 0" in capsys.readouterr().err
+
+
+def test_the_offline_flag_fails_a_command_that_reaches_outside(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import socket
+
+    def leaky(*_args: object) -> int:
+        try:
+            socket.create_connection(("203.0.113.5", 443), timeout=1)
+        except OSError:
+            pass
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_types", leaky)
+
+    assert main(["--offline", "types"], settings=make_settings()) == 1
+
+    assert "203.0.113.5:443" in capsys.readouterr().err
