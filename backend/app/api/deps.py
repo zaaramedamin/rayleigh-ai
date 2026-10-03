@@ -10,7 +10,11 @@ from fastapi import Depends, HTTPException, status
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
-from app.ai.embeddings.base import EmbeddingProvider, ModelNotAvailableError
+from app.ai.embeddings.base import (
+    EmbeddingProvider,
+    EmbeddingRuntimeError,
+    ModelNotAvailableError,
+)
 from app.core.config import Settings, get_settings
 from app.knowledge.components import create_vector_store, load_embedder
 from app.storage.database import create_db_engine
@@ -48,6 +52,8 @@ def get_embedder(settings: SettingsDep) -> EmbeddingProvider:
         raise _unavailable(
             "Embedding model not downloaded. Run `python -m app download-model`."
         ) from exc
+    except EmbeddingRuntimeError as exc:
+        raise _unavailable(str(exc)) from exc
 
 
 def get_vector_store(

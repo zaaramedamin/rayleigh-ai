@@ -2,21 +2,30 @@
 
 import argparse
 import sys
+import time
 from collections.abc import Callable
 
+from pydantic import ValidationError
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from app.ai.embeddings.base import (
     EmbeddingProvider,
+    EmbeddingRuntimeError,
     ModelNotAvailableError,
     is_model_downloaded,
     model_dir_for,
 )
+from app.ai.llm.base import LLMError, LLMUnavailableError
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.knowledge.chunking.service import rechunk_all
-from app.knowledge.components import load_embedder, open_vector_store, vector_store_path
+from app.knowledge.components import (
+    create_llm,
+    load_embedder,
+    open_vector_store,
+    vector_store_path,
+)
 from app.knowledge.indexing.service import (
     IndexSummary,
     count_pending,
@@ -51,7 +60,7 @@ def _open_engine(settings: Settings) -> Engine:
 def _load_embedder(settings: Settings) -> EmbeddingProvider:
     try:
         return load_embedder(settings.embedding_model, settings.models_dir)
-    except ModelNotAvailableError as exc:
+    except (ModelNotAvailableError, EmbeddingRuntimeError) as exc:
         raise CliError(str(exc)) from exc
 
 
@@ -175,6 +184,35 @@ def _cmd_status(_args: argparse.Namespace, settings: Settings) -> int:
     print(f"chunks:          {chunks}")
     print(f"searchable:      {documents - pending} of {documents} documents")
     print(f"vectors:         {vectors}")
+    print(f"llm model:       {settings.llm_model}")
+    print(f"  ollama:        {_llm_state(settings)}")
+    return 0
+
+
+def _llm_state(settings: Settings) -> str:
+    try:
+        installed = create_llm(settings, timeout_seconds=5).list_models()
+    except LLMUnavailableError:
+        return f"not running at {settings.ollama_url} (open the Ollama app or run `ollama serve`)"
+    except LLMError as exc:
+        return f"problem: {exc}"
+    wanted = settings.llm_model if ":" in settings.llm_model else f"{settings.llm_model}:latest"
+    if wanted in installed:
+        return "running, model installed"
+    return f"running, but the model is not installed (run `ollama pull {settings.llm_model}`)"
+
+
+def _cmd_check_llm(_args: argparse.Namespace, settings: Settings) -> int:
+    print(f"asking {settings.llm_model} at {settings.ollama_url} ...")
+    started = time.monotonic()
+    try:
+        reply = create_llm(settings).generate(
+            "This is a connection test. Reply with the single word: ready", "Are you ready?"
+        )
+    except LLMError as exc:
+        raise CliError(str(exc)) from exc
+    print(f"reply: {' '.join(reply.split())[:200]}")
+    print(f"took {time.monotonic() - started:.1f}s")
     return 0
 
 
@@ -262,6 +300,7 @@ def _build_parser() -> argparse.ArgumentParser:
     search.add_argument(
         "--document", action="append", type=int, metavar="ID", help="only this document id"
     )
+    add("check-llm", _cmd_check_llm, "send a test prompt to the local LLM (Ollama)")
     add("types", _cmd_types, "list supported file types")
     add("download-model", _cmd_download_model, "download the embedding model (needs internet)")
     return parser
@@ -273,7 +312,14 @@ def main(argv: list[str] | None = None, settings: Settings | None = None) -> int
         sys.stdout.reconfigure(errors="replace")  # never crash on characters the console lacks
     except (AttributeError, ValueError):
         pass
-    settings = settings or get_settings()
+    try:
+        settings = settings or get_settings()
+    except ValidationError as exc:
+        print("error: invalid settings in .env or the environment:", file=sys.stderr)
+        for problem in exc.errors():
+            name = ".".join(str(part) for part in problem["loc"]).upper() or "settings"
+            print(f"  {name}: {problem['msg']}", file=sys.stderr)
+        return 1
     configure_logging(settings.log_level)
     try:
         return args.handler(args, settings)

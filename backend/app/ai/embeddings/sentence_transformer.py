@@ -2,7 +2,12 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
-from app.ai.embeddings.base import ModelNotAvailableError, is_model_downloaded, model_dir_for
+from app.ai.embeddings.base import (
+    EmbeddingRuntimeError,
+    ModelNotAvailableError,
+    is_model_downloaded,
+    model_dir_for,
+)
 
 
 def _force_offline() -> None:
@@ -27,7 +32,18 @@ class SentenceTransformerProvider:
             )
         _force_offline()
         # Deferred: importing torch takes seconds and is only needed once a model is used.
-        from sentence_transformers import SentenceTransformer
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            hint = ""
+            if "Application Control" in str(exc):
+                hint = (
+                    " Windows (Smart App Control) blocked a library file; re-running once "
+                    "while online sometimes clears it."
+                )
+            raise EmbeddingRuntimeError(
+                f"the embedding library could not be loaded: {exc}.{hint}"
+            ) from exc
 
         self._model = SentenceTransformer(
             str(model_dir_for(models_dir, model_name)),

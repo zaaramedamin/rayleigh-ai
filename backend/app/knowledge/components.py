@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from app.ai.embeddings.base import EmbeddingProvider
+from app.ai.llm.ollama import OllamaProvider
 from app.core.config import Settings
 from app.storage.vector_store import QdrantVectorStore, collection_name
 
@@ -39,3 +40,13 @@ def open_vector_store(
         yield store
     finally:
         store.close()
+
+
+def create_llm(settings: Settings, timeout_seconds: float | None = None) -> OllamaProvider:
+    """The local LLM configured in settings. Nothing is contacted until it is used."""
+    return OllamaProvider(
+        settings.ollama_url,
+        settings.llm_model,
+        timeout_seconds=timeout_seconds or settings.llm_timeout_seconds,
+        think=settings.llm_think,
+    )

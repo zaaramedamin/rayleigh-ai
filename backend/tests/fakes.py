@@ -32,3 +32,32 @@ class HashingEmbedder:
 
     def embed_query(self, text: str) -> list[float]:
         return self._embed(text)
+
+
+class FakeLLM:
+    """Scripted stand-in for a local LLM. Records every prompt it is given."""
+
+    def __init__(
+        self,
+        reply: str = "ready",
+        *,
+        error: Exception | None = None,
+        model_name: str = "test/fake-llm",
+        installed: Sequence[str] = ("test/fake-llm",),
+    ) -> None:
+        self.reply = reply
+        self.error = error
+        self.model_name = model_name
+        self.installed = list(installed)
+        self.calls: list[tuple[str, str]] = []
+
+    def generate(self, system: str, user: str) -> str:
+        self.calls.append((system, user))
+        if self.error is not None:
+            raise self.error
+        return self.reply
+
+    def list_models(self) -> list[str]:
+        if self.error is not None:
+            raise self.error
+        return self.installed

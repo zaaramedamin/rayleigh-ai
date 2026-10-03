@@ -19,6 +19,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "CHUNK_OVERLAP_CHARS",
         "EMBEDDING_MODEL",
         "RETRIEVAL_TOP_K",
+        "OLLAMA_URL",
+        "LLM_MODEL",
+        "LLM_TIMEOUT_SECONDS",
+        "LLM_THINK",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -114,6 +118,68 @@ def test_retrieval_top_k_default_and_env(monkeypatch: pytest.MonkeyPatch) -> Non
 @pytest.mark.parametrize("value", ["0", "51", "many"])
 def test_invalid_retrieval_top_k_is_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("RETRIEVAL_TOP_K", value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_llm_defaults() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.ollama_url == "http://127.0.0.1:11434"
+    assert settings.llm_model == "qwen3.5:4b"
+    assert settings.llm_timeout_seconds == 120
+    assert settings.llm_think is False
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://localhost:11434", "http://localhost:11434"),
+        ("http://127.0.0.1:11434/", "http://127.0.0.1:11434"),
+        ("http://[::1]:11434", "http://[::1]:11434"),
+    ],
+)
+def test_ollama_url_on_this_machine_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, url: str, expected: str
+) -> None:
+    monkeypatch.setenv("OLLAMA_URL", url)
+
+    assert Settings(_env_file=None).ollama_url == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.com:11434",
+        "https://api.openai.com/v1",
+        "http://192.168.1.20:11434",
+        "http://user:pw@localhost:11434",
+        "http://localhost:99999",
+        "localhost:11434",
+        "",
+    ],
+)
+def test_remote_or_malformed_ollama_urls_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setenv("OLLAMA_URL", url)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize("name", ["", "has space", "../evil", "model:", ":tag", "a:b:c"])
+def test_invalid_llm_model_names_are_rejected(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    monkeypatch.setenv("LLM_MODEL", name)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize("value", ["4", "901", "soon"])
+def test_invalid_llm_timeouts_are_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", value)
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)

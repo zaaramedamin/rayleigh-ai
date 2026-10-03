@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from app.ai.embeddings.base import ModelNotAvailableError, is_model_downloaded, model_dir_for
+from app.ai.embeddings.base import (
+    EmbeddingRuntimeError,
+    ModelNotAvailableError,
+    is_model_downloaded,
+    model_dir_for,
+)
 from app.ai.embeddings.sentence_transformer import SentenceTransformerProvider
 from app.storage.files import UnsafePathError
 
@@ -34,4 +39,31 @@ def test_model_is_downloaded_only_when_marker_file_exists(tmp_path: Path) -> Non
 
 def test_provider_refuses_to_start_without_a_downloaded_model(tmp_path: Path) -> None:
     with pytest.raises(ModelNotAvailableError, match="download-model"):
+        SentenceTransformerProvider(MODEL, tmp_path)
+
+
+def _fake_downloaded_model(models_dir: Path) -> None:
+    folder = model_dir_for(models_dir, MODEL)
+    folder.mkdir(parents=True)
+    (folder / "modules.json").write_text("[]")
+
+
+def test_a_library_that_cannot_load_is_reported_clearly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_downloaded_model(tmp_path)
+    blocked = ImportError("DLL load failed while importing _base: An Application Control policy")
+    # Make `from sentence_transformers import ...` fail the way a blocked library file does.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "sentence_transformers":
+            raise blocked
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(EmbeddingRuntimeError, match="Smart App Control"):
         SentenceTransformerProvider(MODEL, tmp_path)

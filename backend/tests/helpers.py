@@ -26,3 +26,18 @@ def add_and_index(
         documents[name] = document
     index_pending(session, embedder, store)
     return documents
+
+
+def real_embedding_model_problem() -> str | None:
+    """Why tests against the real embedding model cannot run here, or None if they can."""
+    from app.ai.embeddings.base import is_model_downloaded
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    if not is_model_downloaded(settings.models_dir, settings.embedding_model):
+        return "embedding model not downloaded (run `python -m app download-model`)"
+    try:
+        import sentence_transformers  # noqa: F401
+    except ImportError as exc:
+        return f"embedding library cannot be loaded here: {exc}"
+    return None

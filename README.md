@@ -51,6 +51,7 @@ Set `ALLOWED_FOLDERS` (comma-separated) and `MAX_FILE_SIZE_MB` in `.env`. Only t
 | `index` | Embed documents that are not searchable yet; `--rebuild` re-embeds everything |
 | `status` | Show documents, chunks, and how many are searchable |
 | `search <question>` | Show the most relevant chunks, with scores and sources (`--top-k`, `--type .md`, `--document ID`) |
+| `check-llm` | Send a test prompt to the local LLM (Ollama) |
 | `types` | List supported file types |
 | `download-model` | Download the embedding model (the only command that uses the internet) |
 
@@ -62,6 +63,15 @@ Each chunk is embedded (turned into a vector) and stored in [Qdrant](https://qdr
 - Each embedding model gets its own collection, so vectors from different models never mix. After changing `EMBEDDING_MODEL`, run `download-model`, then `index`.
 - The vector store only holds ids and filterable metadata. Chunk text and citations always come from the SQLite database.
 - Only one process can open the vector store at a time. If a command says it is in use, stop the API server or wait for the other command.
+
+### Local LLM (Ollama)
+
+Answers are written by a model running in [Ollama](https://ollama.com) on this machine. Set `LLM_MODEL` (default `qwen3.5:4b`) to any model you have pulled with `ollama pull`.
+
+- `python -m app check-llm` sends a test prompt; `python -m app status` shows whether Ollama is running and the model is installed.
+- `OLLAMA_URL` must point at this machine (`localhost`, `127.0.0.1` or `::1`). Any other address is rejected at startup, so prompts built from your notes can never be sent to another computer.
+- Requests ignore system proxy settings and refuse redirects. The prompt and the model's answer are never logged.
+- Reasoning ("thinking") mode is off by default because it is far slower; set `LLM_THINK=true` to turn it on.
 
 ### Searching
 

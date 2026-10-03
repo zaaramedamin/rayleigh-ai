@@ -5,16 +5,14 @@ import os
 
 import pytest
 
-from app.ai.embeddings.base import is_model_downloaded
 from app.ai.embeddings.sentence_transformer import SentenceTransformerProvider
 from app.core.config import get_settings
+from tests.helpers import real_embedding_model_problem
 
 SETTINGS = get_settings()
 
-pytestmark = pytest.mark.skipif(
-    not is_model_downloaded(SETTINGS.models_dir, SETTINGS.embedding_model),
-    reason="embedding model not downloaded (run `python -m app download-model`)",
-)
+_PROBLEM = real_embedding_model_problem()
+pytestmark = pytest.mark.skipif(_PROBLEM is not None, reason=_PROBLEM or "")
 
 
 @pytest.fixture(scope="module")

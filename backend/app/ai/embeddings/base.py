@@ -12,6 +12,10 @@ class ModelNotAvailableError(RuntimeError):
     """The embedding model has not been downloaded into MODELS_DIR."""
 
 
+class EmbeddingRuntimeError(RuntimeError):
+    """The embedding library is installed but cannot be loaded on this machine."""
+
+
 class EmbeddingProvider(Protocol):
     """Turns text into vectors. Implementations must run entirely on this machine."""
 

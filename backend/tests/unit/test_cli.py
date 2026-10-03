@@ -5,12 +5,21 @@ import pytest
 
 import app.ai.embeddings.download as download_module
 from app import cli
+from app.ai.llm.base import LLMModelNotFoundError, LLMUnavailableError
 from app.cli import main
 from app.core.config import Settings
 from app.storage.vector_store import QdrantVectorStore, collection_name
-from tests.fakes import HashingEmbedder
+from tests.fakes import FakeLLM, HashingEmbedder
 
 MakeSettings = Callable[..., Settings]
+
+
+@pytest.fixture(autouse=True)
+def fake_llm(monkeypatch: pytest.MonkeyPatch) -> FakeLLM:
+    """No CLI test may talk to a real Ollama server."""
+    llm = FakeLLM(model_name="qwen3.5:4b", installed=["qwen3.5:4b"])
+    monkeypatch.setattr(cli, "create_llm", lambda *_args, **_kwargs: llm)
+    return llm
 
 
 @pytest.fixture
@@ -266,3 +275,66 @@ def test_search_rejects_an_invalid_top_k(
     assert main(["search", "oats", "--top-k", "0"], settings=make_settings()) == 1
 
     assert "top_k must be between" in capsys.readouterr().err
+
+
+def test_check_llm_prints_the_reply(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings, fake_llm: FakeLLM
+) -> None:
+    fake_llm.reply = "ready"
+
+    assert main(["check-llm"], settings=make_settings()) == 0
+
+    out = capsys.readouterr().out
+    assert "reply: ready" in out
+    assert "took " in out
+
+
+def test_check_llm_reports_a_stopped_server(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings, fake_llm: FakeLLM
+) -> None:
+    fake_llm.error = LLMUnavailableError("Ollama is not reachable; run `ollama serve`")
+
+    assert main(["check-llm"], settings=make_settings()) == 1
+
+    assert "ollama serve" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("installed", "error", "expected"),
+    [
+        (["qwen3.5:4b"], None, "running, model installed"),
+        (["other:1b"], None, "running, but the model is not installed"),
+        ([], LLMUnavailableError("down"), "not running at http://127.0.0.1:11434"),
+        ([], LLMModelNotFoundError("odd"), "problem: odd"),
+    ],
+)
+def test_status_reports_the_llm_state(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    fake_llm: FakeLLM,
+    installed: list[str],
+    error: Exception | None,
+    expected: str,
+) -> None:
+    fake_llm.installed = installed
+    fake_llm.error = error
+
+    assert main(["status"], settings=make_settings()) == 0
+
+    out = capsys.readouterr().out
+    assert "llm model:       qwen3.5:4b" in out
+    assert expected in out
+
+
+def test_invalid_settings_are_reported_in_one_readable_block(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(ollama_url="http://example.com"))
+
+    assert main(["types"]) == 1
+
+    err = capsys.readouterr().err
+    assert "invalid settings" in err
+    assert "OLLAMA_URL" in err
+    assert "Traceback" not in err
