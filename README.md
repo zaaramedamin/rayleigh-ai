@@ -10,6 +10,7 @@ Early development. Phases 0–3 of the [roadmap](docs/roadmap.md) are done: API 
 
 ## Docs
 
+- [How it works](docs/how-it-works.md): what happens to your notes, step by step
 - [Vision](docs/vision.md): what this is and why
 - [Requirements](docs/requirements.md): MVP scope and acceptance criteria
 - [Security](docs/security.md): privacy and safety principles
