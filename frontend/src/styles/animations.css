@@ -1,0 +1,248 @@
+/* ---------- arc reactor ---------- */
+.reactor {
+  overflow: visible;
+  filter: drop-shadow(0 0 10px var(--primary));
+}
+.reactor-line {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 1;
+  opacity: 0.8;
+}
+.reactor-line--bold {
+  stroke-width: 3;
+}
+.reactor-coil {
+  fill: var(--primary-dim);
+  stroke: var(--primary);
+  stroke-width: 1.5;
+}
+.reactor-tri {
+  fill: none;
+  stroke: var(--core);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+.reactor-dot {
+  fill: var(--core);
+}
+.reactor-ring {
+  transform-origin: 100px 100px;
+  animation: spin var(--spin, 40s) linear infinite;
+}
+.reactor-ring--ticks {
+  --spin: 90s;
+  animation-direction: reverse;
+}
+.reactor-ring--coil {
+  --spin: 24s;
+}
+.reactor-ring--core {
+  --spin: 12s;
+  animation-direction: reverse;
+}
+.reactor-core {
+  transform-origin: 100px 100px;
+  animation: pulse 3s ease-in-out infinite;
+}
+.reactor-halo {
+  animation: pulse 4s ease-in-out infinite;
+  transform-origin: 100px 100px;
+}
+.reactor[data-state="thinking"] .reactor-ring {
+  animation-duration: 5s;
+}
+.reactor[data-state="thinking"] .reactor-core {
+  animation-duration: 0.9s;
+}
+.reactor[data-state="offline"] {
+  --primary: var(--danger);
+  --primary-dim: rgba(255, 59, 78, 0.14);
+  --core: #ffd9dd;
+}
+.reactor[data-state="offline"] .reactor-ring {
+  animation-play-state: paused;
+}
+.reactor[data-state="offline"] .reactor-core {
+  animation: flicker 2.4s steps(1) infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.75;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+@keyframes flicker {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  8% {
+    opacity: 0.2;
+  }
+  12% {
+    opacity: 0.9;
+  }
+  60% {
+    opacity: 0.35;
+  }
+}
+
+/* ---------- glitch title ---------- */
+.glitch {
+  position: relative;
+}
+.glitch::before,
+.glitch::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  opacity: 0;
+}
+.glitch::before {
+  color: var(--accent);
+  animation: glitch-a 6s steps(1) infinite;
+}
+.glitch::after {
+  color: var(--danger);
+  animation: glitch-b 6s steps(1) infinite;
+}
+@keyframes glitch-a {
+  0%,
+  92%,
+  100% {
+    opacity: 0;
+    transform: none;
+  }
+  93% {
+    opacity: 0.8;
+    transform: translate(-3px, 1px);
+    clip-path: inset(10% 0 55% 0);
+  }
+  96% {
+    opacity: 0.8;
+    transform: translate(2px, -1px);
+    clip-path: inset(60% 0 8% 0);
+  }
+}
+@keyframes glitch-b {
+  0%,
+  93%,
+  100% {
+    opacity: 0;
+    transform: none;
+  }
+  94% {
+    opacity: 0.7;
+    transform: translate(3px, -1px);
+    clip-path: inset(40% 0 30% 0);
+  }
+  97% {
+    opacity: 0.7;
+    transform: translate(-2px, 1px);
+    clip-path: inset(5% 0 70% 0);
+  }
+}
+
+/* ---------- misc motion ---------- */
+.bg {
+  animation: grid-drift 24s linear infinite;
+}
+@keyframes grid-drift {
+  to {
+    background-position: 0 0, 0 48px, 48px 0, 0 0;
+  }
+}
+.scan::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 18vh;
+  background: linear-gradient(transparent, var(--primary-dim), transparent);
+  animation: sweep 9s linear infinite;
+}
+@keyframes sweep {
+  from {
+    top: -20vh;
+  }
+  to {
+    top: 100vh;
+  }
+}
+.caret {
+  display: inline-block;
+  width: 8px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--primary);
+  animation: blink 0.8s steps(1) infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+.dots::after {
+  content: "";
+  animation: dots 1.2s steps(4) infinite;
+}
+@keyframes dots {
+  0% {
+    content: "";
+  }
+  25% {
+    content: ".";
+  }
+  50% {
+    content: "..";
+  }
+  75% {
+    content: "...";
+  }
+}
+.thinking {
+  color: var(--primary);
+}
+.msg {
+  animation: rise 0.25s ease-out;
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.hud {
+  animation: power-on 0.5s ease-out;
+}
+@keyframes power-on {
+  from {
+    opacity: 0;
+    filter: brightness(2.2);
+  }
+}
+
+/* ---------- reduced motion: the user's setting or the system's ---------- */
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+:root[data-motion="reduced"] .scan {
+  display: none;
+}
