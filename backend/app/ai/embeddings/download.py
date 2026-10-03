@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 from app.ai.embeddings.base import is_model_downloaded, model_dir_for
+from app.ai.embeddings.compat import import_sentence_transformer
 
 
 def download_model(model_name: str, models_dir: Path) -> Path:
@@ -19,7 +20,7 @@ def download_model(model_name: str, models_dir: Path) -> Path:
 
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-    from sentence_transformers import SentenceTransformer
+    SentenceTransformer = import_sentence_transformer()
 
     models_dir.mkdir(parents=True, exist_ok=True)
     # Download into a temporary cache inside MODELS_DIR, save a clean copy, then move it into

@@ -8,6 +8,7 @@ from app.ai.embeddings.base import (
     is_model_downloaded,
     model_dir_for,
 )
+from app.ai.embeddings.compat import import_sentence_transformer
 
 
 def _force_offline() -> None:
@@ -33,7 +34,7 @@ class SentenceTransformerProvider:
         _force_offline()
         # Deferred: importing torch takes seconds and is only needed once a model is used.
         try:
-            from sentence_transformers import SentenceTransformer
+            SentenceTransformer = import_sentence_transformer()
         except ImportError as exc:
             hint = ""
             if "Application Control" in str(exc):

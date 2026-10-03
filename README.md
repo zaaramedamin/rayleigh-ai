@@ -151,7 +151,7 @@ Each stored document is split into chunks, so answers can later cite an exact lo
 
 ## Troubleshooting
 
-- **"blocked by an Application Control policy" when loading the embedding library (Windows).** Windows Smart App Control can block newly installed compiled library files it doesn't recognise yet. Re-running a command while online sometimes clears it. Otherwise Smart App Control must be turned off or the file allowed in Windows Security; Reyleight does not change that setting.
+- **"blocked by an Application Control policy" (Windows).** Smart App Control can block newly installed compiled library files. Reyleight works around the one that matters here: if scikit-learn cannot be loaded, it is replaced by a placeholder, because only unused helper functions of sentence-transformers need it (a warning is logged, and embeddings are unaffected). If a different library file is blocked, the command stops with a one-line error; re-running while online sometimes clears it. Reyleight never changes Windows security settings.
 - **"ollama is not reachable".** Open the Ollama app or run `ollama serve`, then retry. `python -m app status` shows its state.
 - **"search index is in use by another process".** Only one program can open the vector index at a time. Stop the API server or wait for the running command.
 

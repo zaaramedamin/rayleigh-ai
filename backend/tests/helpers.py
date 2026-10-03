@@ -36,8 +36,10 @@ def real_embedding_model_problem() -> str | None:
     settings = get_settings()
     if not is_model_downloaded(settings.models_dir, settings.embedding_model):
         return "embedding model not downloaded (run `python -m app download-model`)"
+    from app.ai.embeddings.compat import import_sentence_transformer
+
     try:
-        import sentence_transformers  # noqa: F401
+        import_sentence_transformer()
     except ImportError as exc:
         return f"embedding library cannot be loaded here: {exc}"
     return None
