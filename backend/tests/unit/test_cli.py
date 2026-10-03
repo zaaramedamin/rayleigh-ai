@@ -338,3 +338,77 @@ def test_invalid_settings_are_reported_in_one_readable_block(
     assert "invalid settings" in err
     assert "OLLAMA_URL" in err
     assert "Traceback" not in err
+
+
+# --- ask ---------------------------------------------------------------------------------------
+
+
+def _ingest_notes(make_settings: MakeSettings, notes: Path, **overrides: object) -> Settings:
+    settings = make_settings(allowed_folders=[notes], **overrides)
+    main(["ingest"], settings=settings)
+    return settings
+
+
+def test_ask_prints_the_answer_and_its_sources(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    notes: Path,
+    fake_model: HashingEmbedder,
+    fake_llm: FakeLLM,
+) -> None:
+    settings = _ingest_notes(make_settings, notes)
+    capsys.readouterr()
+    fake_llm.reply = "It is a plain note [1]."
+
+    assert main(["ask", "what", "is", "the", "plain", "note"], settings=settings) == 0
+
+    out = capsys.readouterr().out
+    assert "It is a plain note [1]." in out
+    assert "Sources:" in out
+    assert "[1] b.txt, lines 1-1" in out
+    assert fake_llm.calls  # the model was asked
+
+
+def test_ask_refuses_when_no_note_is_relevant_and_never_calls_the_model(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    notes: Path,
+    fake_model: HashingEmbedder,
+    fake_llm: FakeLLM,
+) -> None:
+    settings = _ingest_notes(make_settings, notes)
+    capsys.readouterr()
+
+    assert main(["ask", "zebra", "quantum", "giraffe"], settings=settings) == 0
+
+    out = capsys.readouterr().out
+    assert "don't have enough information" in out
+    assert "Sources:" not in out
+    assert fake_llm.calls == []
+
+
+def test_ask_reports_a_stopped_llm_server(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    notes: Path,
+    fake_model: HashingEmbedder,
+    fake_llm: FakeLLM,
+) -> None:
+    settings = _ingest_notes(make_settings, notes)
+    capsys.readouterr()
+    fake_llm.error = LLMUnavailableError("Ollama is not reachable; run `ollama serve`")
+
+    assert main(["ask", "plain", "note"], settings=settings) == 1
+
+    assert "ollama serve" in capsys.readouterr().err
+
+
+def test_ask_without_the_embedding_model_explains_what_to_do(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings, migrated_data_dir: Path
+) -> None:
+    assert main(["ask", "anything"], settings=make_settings()) == 1
+
+    assert "download-model" in capsys.readouterr().err

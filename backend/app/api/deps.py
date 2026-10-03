@@ -1,7 +1,8 @@
-"""FastAPI dependencies: database session, embedding model and vector store per request."""
+"""FastAPI dependencies: database session, embedding model, vector store and LLM per request."""
 
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -15,8 +16,9 @@ from app.ai.embeddings.base import (
     EmbeddingRuntimeError,
     ModelNotAvailableError,
 )
+from app.ai.llm.base import LLMProvider
 from app.core.config import Settings, get_settings
-from app.knowledge.components import create_vector_store, load_embedder
+from app.knowledge.components import create_llm, create_vector_store, load_embedder
 from app.storage.database import create_db_engine
 from app.storage.migrations import database_is_up_to_date
 from app.storage.vector_store import VectorStore, VectorStoreError
@@ -56,9 +58,12 @@ def get_embedder(settings: SettingsDep) -> EmbeddingProvider:
         raise _unavailable(str(exc)) from exc
 
 
-def get_vector_store(
-    settings: SettingsDep, embedder: Annotated[EmbeddingProvider, Depends(get_embedder)]
-) -> Iterator[VectorStore]:
+@contextmanager
+def locked_vector_store(settings: Settings, embedder: EmbeddingProvider) -> Iterator[VectorStore]:
+    """Open the vector store for the duration of the block, one request at a time.
+
+    Hold it only while searching: never while waiting for the LLM, which can take minutes.
+    """
     if not _STORE_LOCK.acquire(timeout=_STORE_WAIT_SECONDS):
         raise _unavailable("The search index is busy. Try again.")
     try:
@@ -74,6 +79,18 @@ def get_vector_store(
         _STORE_LOCK.release()
 
 
+def get_vector_store(
+    settings: SettingsDep, embedder: Annotated[EmbeddingProvider, Depends(get_embedder)]
+) -> Iterator[VectorStore]:
+    with locked_vector_store(settings, embedder) as store:
+        yield store
+
+
+def get_llm(settings: SettingsDep) -> LLMProvider:
+    return create_llm(settings)
+
+
 SessionDep = Annotated[Session, Depends(get_session)]
 EmbedderDep = Annotated[EmbeddingProvider, Depends(get_embedder)]
 VectorStoreDep = Annotated[VectorStore, Depends(get_vector_store)]
+LLMDep = Annotated[LLMProvider, Depends(get_llm)]

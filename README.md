@@ -6,7 +6,7 @@ Everything runs on your machine. No document or query text is sent to a cloud AP
 
 ## Status
 
-Early development. Phases 0–2 of the [roadmap](docs/roadmap.md) are done: API skeleton, database and safe file storage, ingestion of text-based files, chunking with provenance, local embeddings, the vector index, and semantic search with sources. Answering questions with a local LLM (Phase 3) is not built yet.
+Early development. Phases 0–3 of the [roadmap](docs/roadmap.md) are done: API skeleton, database and safe file storage, ingestion of text-based files, chunking with provenance, local embeddings, the vector index, semantic search, and cited answers from a local LLM. Still to do: the evaluation set (Phase 4, Step 11) and the offline verification (Step 12).
 
 ## Docs
 
@@ -51,6 +51,7 @@ Set `ALLOWED_FOLDERS` (comma-separated) and `MAX_FILE_SIZE_MB` in `.env`. Only t
 | `index` | Embed documents that are not searchable yet; `--rebuild` re-embeds everything |
 | `status` | Show documents, chunks, and how many are searchable |
 | `search <question>` | Show the most relevant chunks, with scores and sources (`--top-k`, `--type .md`, `--document ID`) |
+| `ask <question>` | Answer a question from your notes, with citations (`--top-k`, `--type`, `--document`) |
 | `check-llm` | Send a test prompt to the local LLM (Ollama) |
 | `types` | List supported file types |
 | `download-model` | Download the embedding model (the only command that uses the internet) |
@@ -72,6 +73,30 @@ Answers are written by a model running in [Ollama](https://ollama.com) on this m
 - `OLLAMA_URL` must point at this machine (`localhost`, `127.0.0.1` or `::1`). Any other address is rejected at startup, so prompts built from your notes can never be sent to another computer.
 - Requests ignore system proxy settings and refuse redirects. The prompt and the model's answer are never logged.
 - Reasoning ("thinking") mode is off by default because it is far slower; set `LLM_THINK=true` to turn it on.
+
+### Asking questions
+
+```powershell
+python -m app ask how long should I simmer oats in milk
+```
+
+```
+You should simmer rolled oats in milk for five minutes [1].
+
+Sources:
+  [1] oats.md > Oats > Cooking, lines 5-7  (id 1:1)
+```
+
+Or `POST /api/v1/ask` with `{"question": "..."}`. The response has `answer`, `grounded`, `reason`, and `sources` (file, heading, lines, score and the cited text).
+
+How an answer is made, and why you can trust the sources:
+
+1. **Relevance gate.** Only notes scoring at least `ANSWER_MIN_SCORE` (default 0.30) are used. If none do, you get "I don't have enough information in your notes to answer that." and the model is never called.
+2. **Notes are data.** Notes are given to the model as numbered notes inside delimiters that contain a random value, new for every question, so a note cannot fake the end of a note. The model is told to ignore any instructions found inside notes.
+3. **The model can decline.** If the notes are related but don't contain the answer, the model replies `INSUFFICIENT` and you get the same refusal.
+4. **Citations are checked by the app.** The model cites notes by number, and the app maps numbers to real sources from the database. Numbers the model invents are removed. If an answer has no valid citation, it is not shown.
+
+`reason` is one of `answered`, `no_relevant_notes`, `model_declined`, `no_valid_citation`. `ANSWER_MIN_SCORE` is a starting value; the evaluation set (next step) is how it gets tuned. A 4B-parameter local model can still make mistakes, so use the citations to check the answer against your note.
 
 ### Searching
 
@@ -123,6 +148,12 @@ Each stored document is split into chunks, so answers can later cite an exact lo
 - Line numbers refer to the extracted text. They match the original file for text and Markdown, but not for HTML, where tags are removed.
 - Overlap is made of whole lines, so it can be smaller than `CHUNK_OVERLAP_CHARS`, or absent when lines are long.
 - Size and overlap (characters) are `CHUNK_SIZE_CHARS` and `CHUNK_OVERLAP_CHARS` in `.env`. After changing them, run `--rechunk`.
+
+## Troubleshooting
+
+- **"blocked by an Application Control policy" when loading the embedding library (Windows).** Windows Smart App Control can block newly installed compiled library files it doesn't recognise yet. Re-running a command while online sometimes clears it. Otherwise Smart App Control must be turned off or the file allowed in Windows Security; Reyleight does not change that setting.
+- **"ollama is not reachable".** Open the Ollama app or run `ollama serve`, then retry. `python -m app status` shows its state.
+- **"search index is in use by another process".** Only one program can open the vector index at a time. Stop the API server or wait for the running command.
 
 ## Configuration
 

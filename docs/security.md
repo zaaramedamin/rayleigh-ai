@@ -17,6 +17,15 @@
 - `trust_remote_code` is always off: code shipped inside a model repository is never executed.
 - The API server listens on `127.0.0.1` (the uvicorn default). Do not start it with `--host 0.0.0.0`.
 
+## Answering and prompt injection
+
+- Notes are untrusted data. They are passed to the model only in the user message, as numbered notes inside delimiters containing a random per-request value, so a note cannot forge its own boundaries.
+- The system prompt tells the model never to follow instructions found inside notes. The model has no tools and cannot take actions: its output is only ever displayed.
+- Sources shown to the user are built by the application from the database. Citation numbers from the model are validated, and invented ones are discarded. An answer with no valid citation is not returned.
+- If no note is relevant enough, the assistant refuses without calling the model.
+- The LLM server address must be on this machine (`localhost`, `127.0.0.1` or `::1`); anything else is rejected at startup. Requests ignore system proxies and refuse redirects.
+- Questions, notes and answers are never written to logs.
+
 ## Threats to keep in mind
 
 - Path traversal through filenames.

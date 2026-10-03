@@ -19,6 +19,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "CHUNK_OVERLAP_CHARS",
         "EMBEDDING_MODEL",
         "RETRIEVAL_TOP_K",
+        "ANSWER_MIN_SCORE",
         "OLLAMA_URL",
         "LLM_MODEL",
         "LLM_TIMEOUT_SECONDS",
@@ -180,6 +181,21 @@ def test_invalid_llm_model_names_are_rejected(monkeypatch: pytest.MonkeyPatch, n
 @pytest.mark.parametrize("value", ["4", "901", "soon"])
 def test_invalid_llm_timeouts_are_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_answer_min_score_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings(_env_file=None).answer_min_score == 0.30
+
+    monkeypatch.setenv("ANSWER_MIN_SCORE", "0.45")
+    assert Settings(_env_file=None).answer_min_score == 0.45
+
+
+@pytest.mark.parametrize("value", ["-0.1", "1.1", "high"])
+def test_invalid_answer_min_score_is_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("ANSWER_MIN_SCORE", value)
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)

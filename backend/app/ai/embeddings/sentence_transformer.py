@@ -42,7 +42,7 @@ class SentenceTransformerProvider:
                     "while online sometimes clears it."
                 )
             raise EmbeddingRuntimeError(
-                f"the embedding library could not be loaded: {exc}.{hint}"
+                f"the embedding library could not be loaded: {str(exc).rstrip('.')}.{hint}"
             ) from exc
 
         self._model = SentenceTransformer(

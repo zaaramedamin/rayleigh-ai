@@ -19,6 +19,7 @@ from app.ai.embeddings.base import (
 from app.ai.llm.base import LLMError, LLMUnavailableError
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
+from app.knowledge.answering.service import Answer, compose_answer
 from app.knowledge.chunking.service import rechunk_all
 from app.knowledge.components import (
     create_llm,
@@ -255,6 +256,51 @@ def _cmd_search(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _print_answer(answer: Answer) -> None:
+    print(answer.text)
+    if not answer.sources:
+        return
+    print()
+    print("Sources:")
+    for source in answer.sources:
+        heading = f" > {source.heading_path}" if source.heading_path else ""
+        print(
+            f"  [{source.marker}] {source.source}{heading}, "
+            f"lines {source.start_line}-{source.end_line}  (id {source.citation_id})"
+        )
+
+
+def _cmd_ask(args: argparse.Namespace, settings: Settings) -> int:
+    question = " ".join(args.question)
+    engine = _open_engine(settings)
+    embedder = _load_embedder(settings)
+    with Session(engine) as session:
+        try:
+            with open_vector_store(settings, embedder) as store:
+                retrieved = retrieve(
+                    session,
+                    embedder,
+                    store,
+                    question,
+                    top_k=settings.retrieval_top_k if args.top_k is None else args.top_k,
+                    document_ids=args.document,
+                    file_types=args.type,
+                )
+            print("thinking ...", file=sys.stderr, flush=True)
+            answer = compose_answer(
+                create_llm(settings), question, retrieved, settings.answer_min_score
+            )
+        except (ValueError, VectorStoreError, LLMError) as exc:
+            raise CliError(str(exc)) from exc
+        pending = count_pending(session, settings.embedding_model)
+
+    _print_answer(answer)
+    if pending:
+        print()
+        print(f"note: {pending} document(s) are not indexed yet; run `python -m app index`")
+    return 0
+
+
 def _cmd_download_model(_args: argparse.Namespace, settings: Settings) -> int:
     target = model_dir_for(settings.models_dir, settings.embedding_model)
     if is_model_downloaded(settings.models_dir, settings.embedding_model):
@@ -298,6 +344,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--type", action="append", metavar="EXT", help="only this file type, e.g. .md (repeatable)"
     )
     search.add_argument(
+        "--document", action="append", type=int, metavar="ID", help="only this document id"
+    )
+    ask = add("ask", _cmd_ask, "answer a question from your notes, with citations")
+    ask.add_argument("question", nargs="+", help="your question (quotes are optional)")
+    ask.add_argument("--top-k", type=int, help="notes to consider (default: RETRIEVAL_TOP_K)")
+    ask.add_argument(
+        "--type", action="append", metavar="EXT", help="only this file type, e.g. .md (repeatable)"
+    )
+    ask.add_argument(
         "--document", action="append", type=int, metavar="ID", help="only this document id"
     )
     add("check-llm", _cmd_check_llm, "send a test prompt to the local LLM (Ollama)")

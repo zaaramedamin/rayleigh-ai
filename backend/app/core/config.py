@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     # Number of chunks a search returns by default.
     retrieval_top_k: int = Field(default=5, ge=1, le=MAX_TOP_K)
+    # Minimum similarity for a note to be used to answer. Weaker matches are ignored, and if
+    # none is left the assistant says it does not have enough information. Tune with the
+    # evaluation set.
+    answer_min_score: float = Field(default=0.30, ge=0.0, le=1.0)
     # Local LLM, served by Ollama on this machine. Remote URLs are rejected.
     ollama_url: str = "http://127.0.0.1:11434"
     llm_model: str = "qwen3.5:4b"
