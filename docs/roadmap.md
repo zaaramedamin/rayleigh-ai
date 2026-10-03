@@ -28,6 +28,8 @@ Work proceeds one small, tested slice at a time. Before each step, its slice and
 
 ## Future direction (not started; only on explicit request)
 
+The detailed plan for everything below, with slices, acceptance criteria and risks, is in [full-assistant-guide.md](full-assistant-guide.md). The multi-platform architecture (web, Windows `.exe`, phone) and the interface prototype are in [product-roadmap.md](product-roadmap.md) and [frontend.md](frontend.md).
+
 - PDF and DOCX ingestion
 - React + TypeScript frontend
 - Long-term memory
