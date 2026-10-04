@@ -51,7 +51,10 @@ def get_session(settings: SettingsDep) -> Iterator[Session]:
     except SecurityError as exc:
         raise _unavailable(str(exc)) from exc
     if not database_is_up_to_date(engine):
-        raise _unavailable("Database missing or out of date. Run `alembic upgrade head`.")
+        raise _unavailable(
+            "Database missing or out of date. Run `alembic upgrade head` in the backend folder "
+            "(with the virtual environment active)."
+        )
     with Session(engine) as session:
         yield session
 
