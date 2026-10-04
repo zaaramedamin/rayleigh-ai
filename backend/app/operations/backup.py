@@ -19,6 +19,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app import __version__
+from app.security.errors import KeystoreError
+from app.security.keystore import SECURITY_FILENAME, library_state, read_keyfile
+from app.security.vault import BLOB_MAGIC
 from app.storage.database import DB_FILENAME
 from app.storage.files import FILES_SUBDIR
 from app.storage.migrations import schema_revision_status
@@ -42,6 +45,7 @@ class BackupSummary:
     files: int
     archive_bytes: int
     schema_revision: str
+    encrypted: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -53,6 +57,7 @@ class RestoreSummary:
     files: int
     schema_revision: str
     needs_migration: bool
+    encrypted: bool = False
 
 
 def _sha256_of(path: Path) -> str:
@@ -61,6 +66,16 @@ def _sha256_of(path: Path) -> str:
         while block := handle.read(_CHUNK):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _starts_with_magic(path: Path) -> bool:
+    """True for an encrypted stored file (its name is the hash of the plaintext, not of itself)."""
+    with path.open("rb") as handle:
+        return handle.read(len(BLOB_MAGIC)) == BLOB_MAGIC
+
+
+def _count_files(entries: dict[str, dict[str, object]]) -> int:
+    return sum(1 for name in entries if name.startswith(f"{FILES_SUBDIR}/"))
 
 
 def _is_inside(path: Path, folder: Path) -> bool:
@@ -93,6 +108,10 @@ def create_backup(data_dir: Path, destination: Path) -> BackupSummary:
     if _is_inside(destination, data_dir):
         raise BackupError("the backup must be saved outside the data folder it protects")
 
+    try:
+        encrypted = library_state(data_dir) == "encrypted"
+    except KeystoreError as exc:
+        raise BackupError(str(exc)) from exc
     destination.parent.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
     entries: dict[str, dict[str, object]] = {}
@@ -119,13 +138,23 @@ def create_backup(data_dir: Path, destination: Path) -> BackupSummary:
                     "size": db_copy.stat().st_size,
                 }
 
+                key_file = data_dir / SECURITY_FILENAME
+                if key_file.is_file():
+                    # Needed to restore on another computer (with the recovery passphrase). It is
+                    # not secret: without the passphrase or the Windows account it unlocks nothing.
+                    archive.write(key_file, SECURITY_FILENAME)
+                    entries[SECURITY_FILENAME] = {
+                        "sha256": _sha256_of(key_file),
+                        "size": key_file.stat().st_size,
+                    }
+
                 files_root = data_dir / FILES_SUBDIR
                 for path in sorted(files_root.rglob("*")) if files_root.is_dir() else []:
                     if not path.is_file():
                         continue
                     name = path.relative_to(data_dir).as_posix()
                     digest = _sha256_of(path)
-                    if digest != path.name:
+                    if digest != path.name and not _starts_with_magic(path):
                         warnings.append(f"stored file {path.name[:12]}... does not match its hash")
                     archive.write(path, name)
                     entries[name] = {"sha256": digest, "size": path.stat().st_size}
@@ -149,9 +178,10 @@ def create_backup(data_dir: Path, destination: Path) -> BackupSummary:
         path=destination,
         documents=documents,
         chunks=chunks,
-        files=len(entries) - 1,
+        files=_count_files(entries),
         archive_bytes=destination.stat().st_size,
         schema_revision=revision,
+        encrypted=encrypted,
         warnings=warnings,
     )
 
@@ -170,7 +200,7 @@ def _load_manifest(archive: zipfile.ZipFile) -> dict[str, object]:
 
 def _check_entry_names(names: set[str], listed: set[str]) -> None:
     for name in listed:
-        if name != DB_FILENAME and not _FILE_ENTRY.match(name):
+        if name not in (DB_FILENAME, SECURITY_FILENAME) and not _FILE_ENTRY.match(name):
             raise BackupError(f"the backup lists an unexpected entry: {name!r}")
     if DB_FILENAME not in listed:
         raise BackupError("the backup has no database")
@@ -215,10 +245,6 @@ def restore_backup(archive_path: Path, target_dir: Path) -> RestoreSummary:
                 or not isinstance(size, int)
             ):
                 raise BackupError(f"the manifest entry for {name!r} is damaged")
-            match = _FILE_ENTRY.match(name)
-            if match and match.group(2) != expected:
-                raise BackupError(f"stored file {name!r} does not match its own hash")
-
             destination = staging / name  # the name was validated against a strict pattern
             destination.parent.mkdir(parents=True, exist_ok=True)
             digest = hashlib.sha256()
@@ -232,6 +258,18 @@ def restore_backup(archive_path: Path, target_dir: Path) -> RestoreSummary:
                     out.write(block)
             if written != size or digest.hexdigest() != expected:
                 raise BackupError(f"checksum mismatch for {name!r}: the backup is damaged")
+            match = _FILE_ENTRY.match(name)
+            if match and match.group(2) != expected and not _starts_with_magic(destination):
+                # a plain stored file must hash to its own name; an encrypted one is checked
+                # when it is decrypted
+                raise BackupError(f"stored file {name!r} does not match its own hash")
+
+        encrypted = SECURITY_FILENAME in entries
+        if encrypted:
+            try:
+                read_keyfile(staging)
+            except KeystoreError as exc:
+                raise BackupError(f"the key file inside the backup is damaged: {exc}") from exc
 
         db_path = staging / DB_FILENAME
         documents, chunks, revision = _read_counts(db_path)
@@ -266,7 +304,8 @@ def restore_backup(archive_path: Path, target_dir: Path) -> RestoreSummary:
         target=target_dir,
         documents=documents,
         chunks=chunks,
-        files=len(entries) - 1,
+        files=_count_files(entries),
         schema_revision=revision,
         needs_migration=needs_migration,
+        encrypted=encrypted,
     )

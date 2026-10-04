@@ -69,13 +69,14 @@ def by_name(checks: list[Check]) -> dict[str, Check]:
     return {c.name: c for c in checks}
 
 
-def test_a_healthy_setup_has_no_failures_and_no_warnings(
+def test_a_healthy_plaintext_library_only_warns_that_it_is_not_encrypted(
     healthy: Path, make_settings: MakeSettings, notes: Path
 ) -> None:
     checks = by_name(run_doctor(make_settings(allowed_folders=[notes])))
 
     assert {name: c.status for name, c in checks.items()} == {
         "database": "ok",
+        "encryption": "warn",
         "stored files": "ok",
         "chunks": "ok",
         "search index": "ok",
@@ -337,3 +338,150 @@ def test_the_report_lists_fixes_only_for_problems_and_a_summary() -> None:
     assert "fix: do this" in text
     assert "ignored when ok" not in text
     assert text.endswith("1 ok, 1 warning(s), 1 failure(s)")
+
+
+# --- encrypted libraries -----------------------------------------------------------------------
+
+
+PASSPHRASE = "correct horse battery staple"
+
+
+@pytest.fixture
+def encrypted(healthy: Path) -> Path:
+    from app.security.migrate import encrypt_library
+
+    encrypt_library(healthy, PASSPHRASE, backup_to=None)
+    return healthy
+
+
+def test_a_healthy_encrypted_library_is_all_ok(
+    encrypted: Path, make_settings: MakeSettings, notes: Path
+) -> None:
+    checks = by_name(run_doctor(make_settings(allowed_folders=[notes])))
+
+    assert checks["encryption"].status == "ok"
+    assert "AES-256-GCM" in checks["encryption"].message
+    assert "Windows unlocks it automatically" in checks["encryption"].message
+    assert checks["stored files"].status == "ok"
+    assert "checksums verified" in checks["stored files"].message
+
+
+def test_the_plaintext_library_warning_names_the_fix(
+    healthy: Path, make_settings: MakeSettings
+) -> None:
+    check = by_name(run_doctor(make_settings()))["encryption"]
+
+    assert check.status == "warn"
+    assert "NOT encrypted" in check.message
+    assert check.fix == "python -m app encrypt-library"
+
+
+def test_a_locked_library_is_reported_with_a_plain_fix_and_nothing_else_is_guessed(
+    encrypted: Path, make_settings: MakeSettings
+) -> None:
+    from app.security import keystore
+
+    keyfile = keystore.read_keyfile(encrypted)
+    assert keyfile is not None
+    keystore._write_keyfile(encrypted, keystore._replace(keyfile, wrapped_by_windows=None))
+
+    checks = by_name(run_doctor(make_settings()))
+
+    assert checks["encryption"].status == "fail"
+    assert "locked" in checks["encryption"].message
+    assert "recovery passphrase" in (checks["encryption"].fix or "")
+    assert "stored files" not in checks  # nothing is read while locked
+
+
+def test_the_doctor_can_unlock_with_the_passphrase_and_then_check_everything(
+    encrypted: Path, make_settings: MakeSettings
+) -> None:
+    from app.security import keystore
+
+    keyfile = keystore.read_keyfile(encrypted)
+    assert keyfile is not None
+    keystore._write_keyfile(encrypted, keystore._replace(keyfile, wrapped_by_windows=None))
+
+    checks = by_name(run_doctor(make_settings(), passphrase=PASSPHRASE))
+
+    assert checks["stored files"].status == "ok"
+
+
+def test_a_wrong_passphrase_is_a_failure_not_a_crash(
+    encrypted: Path, make_settings: MakeSettings
+) -> None:
+    from app.security import keystore
+
+    keyfile = keystore.read_keyfile(encrypted)
+    assert keyfile is not None
+    keystore._write_keyfile(encrypted, keystore._replace(keyfile, wrapped_by_windows=None))
+
+    checks = by_name(run_doctor(make_settings(), passphrase="definitely not it at all"))
+
+    assert checks["encryption"].status == "fail"
+    assert "not correct" in checks["encryption"].message
+
+
+def test_a_half_finished_encryption_is_a_failure_that_says_how_to_resume(
+    healthy: Path, make_settings: MakeSettings
+) -> None:
+    from app.security import keystore
+
+    keystore.create_keys(healthy, PASSPHRASE, state="migrating")
+
+    check = by_name(run_doctor(make_settings()))["encryption"]
+
+    assert check.status == "fail"
+    assert check.fix == "python -m app encrypt-library"
+
+
+def test_plaintext_values_left_in_an_encrypted_library_are_found(
+    encrypted: Path, make_settings: MakeSettings
+) -> None:
+    connection = sqlite3.connect(encrypted / DB_FILENAME)
+    connection.execute("UPDATE chunks SET text = 'left behind in plaintext' WHERE id = 1")
+    connection.commit()
+    connection.close()
+
+    check = by_name(run_doctor(make_settings()))["encryption"]
+
+    assert check.status == "fail"
+    assert "1 value(s) in the database are not encrypted" in check.message
+
+
+def test_a_plaintext_stored_file_in_an_encrypted_library_is_found(
+    encrypted: Path, make_settings: MakeSettings
+) -> None:
+    import hashlib
+
+    victim = next(p for p in (encrypted / "files").rglob("*") if p.is_file())
+    # a plaintext file stored under its own hash name, as an unencrypted leftover would be
+    content = b"plain leftover"
+    stored = victim.with_name(hashlib.sha256(content).hexdigest())
+    stored.write_bytes(content)
+    connection = sqlite3.connect(encrypted / DB_FILENAME)
+    connection.execute(
+        "UPDATE documents SET content_hash = ?, stored_path = ? WHERE id = 1",
+        (stored.name, f"files/{stored.parent.name}/{stored.name}"),
+    )
+    connection.commit()
+    connection.close()
+
+    checks = by_name(run_doctor(make_settings()))
+
+    assert checks["stored files"].status == "fail"
+    assert "not encrypted in an encrypted library" in checks["stored files"].message
+
+
+def test_a_tampered_encrypted_stored_file_is_found(
+    encrypted: Path, make_settings: MakeSettings
+) -> None:
+    victim = next(p for p in (encrypted / "files").rglob("*") if p.is_file())
+    data = bytearray(victim.read_bytes())
+    data[-5] ^= 1
+    victim.write_bytes(bytes(data))
+
+    checks = by_name(run_doctor(make_settings()))
+
+    assert checks["stored files"].status == "fail"
+    assert "do not match their checksum" in checks["stored files"].message

@@ -7,21 +7,39 @@ anything else that would delete data are reported, never removed.
 
 import hashlib
 import shutil
+import sqlite3
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import Engine, func, select, update
 from sqlalchemy.orm import Session
 
 from app.ai.embeddings.base import is_model_downloaded
 from app.ai.llm.base import LLMError, LLMUnavailableError
 from app.core.config import Settings
 from app.knowledge.components import create_llm, vector_store_path
+from app.security import keystore
+from app.security.errors import (
+    DecryptionError,
+    KeystoreError,
+    LibraryLockedError,
+    MigrationIncompleteError,
+    SecurityError,
+    WrongPassphraseError,
+)
+from app.security.migrate import plaintext_values
+from app.security.sqlalchemy_types import vault_of_session
 from app.storage.database import DB_FILENAME, create_db_engine
-from app.storage.files import FILES_SUBDIR, UnsafePathError, resolve_inside
+from app.storage.files import (
+    FILES_SUBDIR,
+    UnsafePathError,
+    file_context,
+    looks_encrypted,
+    resolve_inside,
+)
 from app.storage.migrations import database_is_up_to_date
 from app.storage.models import Chunk, Document
 from app.storage.vector_store import VectorStoreError, collection_name, count_local_vectors
@@ -181,29 +199,103 @@ def _check_windows_protection() -> Check | None:
     )
 
 
-def _check_database(settings: Settings) -> tuple[Check, bool]:
-    """Returns the check and whether the database is usable for the checks that follow."""
+def _open_library(settings: Settings, passphrase: str | None) -> tuple[Engine | None, list[Check]]:
+    """Open the library (unlocking it if encrypted). Returns the engine, or None with the reason."""
     db_path = settings.data_dir / DB_FILENAME
     if not db_path.is_file():
-        return (
-            Check("database", "fail", f"no database at {db_path}", "alembic upgrade head"),
-            False,
-        )
-    engine = create_db_engine(settings.data_dir)
+        return None, [
+            Check("database", "fail", f"no database at {db_path}", "alembic upgrade head")
+        ]
     try:
-        if not database_is_up_to_date(engine):
-            return (
-                Check("database", "fail", "the database is out of date", "alembic upgrade head"),
-                False,
+        engine = create_db_engine(settings.data_dir, passphrase=passphrase)
+    except LibraryLockedError:
+        return None, [
+            Check(
+                "encryption",
+                "fail",
+                "the library is encrypted and locked: Windows could not unlock it for this account",
+                "run any `python -m app` command in a terminal and type the recovery passphrase "
+                "when asked; it is then remembered for this Windows account",
             )
-    finally:
+        ]
+    except WrongPassphraseError:
+        return None, [Check("encryption", "fail", "that recovery passphrase is not correct")]
+    except MigrationIncompleteError:
+        return None, [
+            Check(
+                "encryption",
+                "fail",
+                "encrypting the library was started but not finished",
+                "python -m app encrypt-library",
+            )
+        ]
+    except SecurityError as exc:
+        return None, [Check("encryption", "fail", str(exc))]
+    if not database_is_up_to_date(engine):
         engine.dispose()
-    return Check("database", "ok", "present and at the latest version"), True
+        return None, [
+            Check("database", "fail", "the database is out of date", "alembic upgrade head")
+        ]
+    return engine, [Check("database", "ok", "present and at the latest version")]
+
+
+def _check_encryption(settings: Settings, engine: Engine, *, deep: bool) -> list[Check]:
+    try:
+        state = keystore.library_state(settings.data_dir)
+    except KeystoreError as exc:
+        return [Check("encryption", "fail", str(exc), "restore security.json from a backup")]
+    if state == "plaintext":
+        return [
+            Check(
+                "encryption",
+                "warn",
+                "the library is NOT encrypted: notes, headings and file names are readable on disk",
+                "python -m app encrypt-library",
+            )
+        ]
+    checks: list[Check] = []
+    leftovers = _plaintext_value_count(settings.data_dir / DB_FILENAME)
+    if leftovers:
+        checks.append(
+            Check(
+                "encryption",
+                "fail",
+                f"{leftovers} value(s) in the database are not encrypted",
+                "python -m app encrypt-library",
+            )
+        )
+    else:
+        windows = keystore.windows_unlock_works(settings.data_dir)
+        checks.append(
+            Check(
+                "encryption",
+                "ok" if windows else "warn",
+                "encrypted (AES-256-GCM); "
+                + (
+                    "Windows unlocks it automatically for this account"
+                    if windows
+                    else "Windows cannot unlock it for this account; the recovery "
+                    "passphrase is needed"
+                ),
+                None if windows else "run any command and type the recovery passphrase once",
+            )
+        )
+    del engine, deep
+    return checks
+
+
+def _plaintext_value_count(db_path: Path) -> int:
+    connection = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    try:
+        return plaintext_values(connection)
+    finally:
+        connection.close()
 
 
 def _check_files(session: Session, settings: Settings, *, quick: bool) -> list[Check]:
     rows = session.execute(select(Document.id, Document.content_hash, Document.stored_path)).all()
-    missing = corrupt = unsafe = 0
+    vault = vault_of_session(session)
+    missing = corrupt = unsafe = unencrypted = 0
     for _doc_id, content_hash, stored_path in rows:
         try:
             path = resolve_inside(settings.data_dir, stored_path)
@@ -212,8 +304,21 @@ def _check_files(session: Session, settings: Settings, *, quick: bool) -> list[C
             continue
         if not path.is_file():
             missing += 1
-        elif not quick and _sha256(path) != content_hash:
-            corrupt += 1
+        elif not quick:
+            raw = path.read_bytes()
+            if looks_encrypted(raw, content_hash):
+                try:
+                    plain = vault.decrypt_bytes(raw, file_context(content_hash)) if vault else b""
+                except DecryptionError:
+                    corrupt += 1
+                    continue
+                if vault is None or hashlib.sha256(plain).hexdigest() != content_hash:
+                    corrupt += 1
+            else:
+                if vault is not None:
+                    unencrypted += 1
+                if hashlib.sha256(raw).hexdigest() != content_hash:
+                    corrupt += 1
 
     checks = []
     problems = []
@@ -223,6 +328,8 @@ def _check_files(session: Session, settings: Settings, *, quick: bool) -> list[C
         problems.append(f"{corrupt} stored file(s) do not match their checksum")
     if unsafe:
         problems.append(f"{unsafe} document(s) point outside the data folder")
+    if unencrypted:
+        problems.append(f"{unencrypted} stored file(s) are not encrypted in an encrypted library")
     if problems:
         checks.append(
             Check(
@@ -347,14 +454,22 @@ def _guarded(name: str, check: Callable[[], list[Check]]) -> list[Check]:
         return [Check(name, "fail", f"the check itself failed: {type(exc).__name__}")]
 
 
-def run_doctor(settings: Settings, *, repair: bool = False, quick: bool = False) -> list[Check]:
+def run_doctor(
+    settings: Settings,
+    *,
+    repair: bool = False,
+    quick: bool = False,
+    passphrase: str | None = None,
+) -> list[Check]:
     results: list[Check] = []
-    database, usable = _check_database(settings)
-    results.append(database)
+    engine, opened = _open_library(settings, passphrase)
+    results += opened
 
-    if usable:
-        engine = create_db_engine(settings.data_dir)
+    if engine is not None:
         try:
+            results += _guarded(
+                "encryption", lambda: _check_encryption(settings, engine, deep=not quick)
+            )
             with Session(engine) as session:
                 results += _guarded(
                     "stored files", lambda: _check_files(session, settings, quick=quick)

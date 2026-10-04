@@ -277,12 +277,20 @@ def test_unsafe_entry_names_are_refused_even_with_a_valid_looking_manifest(
 def test_a_file_that_does_not_match_its_own_hash_name_is_refused(
     archive: Path, tmp_path: Path
 ) -> None:
+    import hashlib
+
     with zipfile.ZipFile(archive) as z:
         manifest = json.loads(z.read("manifest.json"))
         victim = next(n for n in manifest["entries"] if n.startswith("files/"))
-    manifest["entries"][victim]["sha256"] = "b" * 64
+    swapped_in = b"plain content stored under the wrong name"
+    # an internally consistent archive: the manifest matches the new bytes, but the file name
+    # (which must be the hash of the content) does not
+    manifest["entries"][victim] = {
+        "sha256": hashlib.sha256(swapped_in).hexdigest(),
+        "size": len(swapped_in),
+    }
     bad = tmp_path / "renamed.zip"
-    _rewrite_zip(archive, bad, {"manifest.json": json.dumps(manifest).encode()})
+    _rewrite_zip(archive, bad, {"manifest.json": json.dumps(manifest).encode(), victim: swapped_in})
 
     with pytest.raises(BackupError, match="does not match its own hash"):
         restore_backup(bad, tmp_path / "restored")

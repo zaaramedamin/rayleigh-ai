@@ -77,6 +77,10 @@ The `--constraint` matters: without it, `pip-compile` picks the newest version o
 | `check-llm` | Send a test prompt to the local LLM (Ollama) |
 | `eval` | Measure retrieval and answer quality on a built-in test set (`--answers`, `--chunk-size`, `--min-score`, `--output`) |
 | `offline-check` | Run the whole pipeline with all non-local network access blocked, and report any attempt |
+| `encrypt-library` | Encrypt the library: note text, headings, file names and stored files (makes a safety backup first) |
+| `security` | Show whether the library is encrypted and how it unlocks |
+| `recovery-check` | Confirm that your recovery passphrase unlocks the library |
+| `change-passphrase` | Set a new recovery passphrase |
 | `doctor` | Check the whole setup and say how to fix each problem (`--quick`, `--fix`) |
 | `backup` | Save the library (database and stored files) to one verified archive |
 | `restore` | Restore a backup archive into an empty folder, after verifying every checksum |
@@ -200,6 +204,35 @@ Each stored document is split into chunks, so answers can later cite an exact lo
 - Line numbers refer to the extracted text. They match the original file for text and Markdown, but not for HTML, where tags are removed.
 - Overlap is made of whole lines, so it can be smaller than `CHUNK_OVERLAP_CHARS`, or absent when lines are long.
 - Size and overlap (characters) are `CHUNK_SIZE_CHARS` and `CHUNK_OVERLAP_CHARS` in `.env`. After changing them, run `--rechunk`.
+
+## Encrypting your library
+
+By default your library is stored as plain data in `data/`. To encrypt it:
+
+```powershell
+python -m app encrypt-library      # asks for a recovery passphrase, backs up first, then encrypts
+python -m app recovery-check       # confirm the passphrase you wrote down really works
+python -m app doctor               # everything should say OK, including "encryption"
+```
+
+Stop the API server and any other Reyleight program before encrypting, and start the server again afterwards.
+
+**What is encrypted** (AES-256-GCM, through Windows' own cryptography, so there is nothing extra to install): the text of your notes, their headings, their file names, the stored copies of your files, and therefore backups, which contain only those encrypted forms. Every value is authenticated: if anyone changes a single value, reading it fails instead of returning altered text.
+
+**What is not encrypted:** the search vectors in `data/qdrant/` (search needs them readable; they are numbers, but they do reveal what your notes are about), and structure such as sizes, line numbers, counts and the content hash of each file. Turn on **BitLocker** for the drive to protect those too.
+
+**How it unlocks.** One random key encrypts everything. It is stored in `data/security.json` in two protected forms:
+- **by your Windows account**: while you are signed in, everything unlocks automatically and you never type anything;
+- **by your recovery passphrase** (either one you choose, or a random key the tool generates): used on another computer, or if Windows is reinstalled or the account is lost. If you lose both the Windows account and the passphrase, the data **cannot be recovered**, by anyone.
+
+When Windows cannot unlock the library (for example a restored backup on a new PC), the first command asks for the recovery passphrase, then remembers it for that Windows account. In unattended runs, set the environment variable `REYLEIGHT_PASSPHRASE` instead. `change-passphrase` replaces the passphrase without re-encrypting any data (older backups still need the passphrase they were made with).
+
+**Honest limits.**
+- This protects the files on disk (a stolen laptop, a copied folder, a leaked backup). It does not protect against a program running as you while you are signed in, because that program can use the same Windows unlock as Reyleight does.
+- Anything written to disk in plaintext *before* you encrypted may survive in unused disk space. `encrypt-library` removes the old plaintext from the database file and replaces the stored files, but the file system may keep old blocks. To overwrite them, run `cipher /w:<your data folder>` (a Windows built-in; it takes a while) or rely on BitLocker. The safety backup made before encrypting is the unencrypted original: delete it once everything works.
+- Values are tied to their column (or file name), so a value moved to another place fails to decrypt, but swapping whole *rows* of the same column is not detected.
+- Encryption uses Windows' cryptography, so it is available on Windows only.
+- A note whose first characters happen to be `reyleight-enc-v1:` would be mistaken for encrypted data in a library that is not encrypted. That is vanishingly unlikely, and it cannot happen in an encrypted one.
 
 ## Checking and protecting your library
 

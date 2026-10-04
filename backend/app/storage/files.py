@@ -6,8 +6,11 @@ import tempfile
 from pathlib import Path
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
+from app.security.errors import LibraryLockedError
+from app.security.sqlalchemy_types import vault_of_session
+from app.security.vault import Vault
 from app.storage.models import Document
 
 FILES_SUBDIR = "files"
@@ -40,7 +43,8 @@ def _stored_path_for(content_hash: str) -> str:
     return f"{FILES_SUBDIR}/{content_hash[:2]}/{content_hash}"
 
 
-def _write_atomic(target: Path, data: bytes) -> None:
+def write_file_atomic(target: Path, data: bytes) -> None:
+    """Write `data` to `target` through a temporary file, so a crash never leaves a partial file."""
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=target.parent, suffix=".tmp")
     try:
@@ -66,7 +70,11 @@ def store_file(
 
     target = resolve_inside(data_dir, stored_path)
     if not target.exists():
-        _write_atomic(target, data)
+        vault = vault_of_session(session)
+        # In an encrypted library the stored copy is encrypted too, and bound to its file name.
+        write_file_atomic(
+            target, data if vault is None else vault.encrypt_bytes(data, file_context(content_hash))
+        )
 
     existing = session.scalar(select(Document).where(Document.content_hash == content_hash))
     if existing is not None:
@@ -90,6 +98,27 @@ def save_file(session: Session, data_dir: Path, data: bytes, filename: str) -> D
     return store_file(session, data_dir, data, filename)[0]
 
 
+def file_context(content_hash: str) -> bytes:
+    """What an encrypted stored file is bound to, so it cannot be swapped for another file."""
+    return f"file:{content_hash}".encode("ascii")
+
+
+def looks_encrypted(raw: bytes, content_hash: str) -> bool:
+    """True for an encrypted stored file. A plaintext file that merely starts with the same
+    marker bytes is told apart by its hash, which is also its file name."""
+    return Vault.is_encrypted_blob(raw) and hashlib.sha256(raw).hexdigest() != content_hash
+
+
 def read_file(data_dir: Path, document: Document) -> bytes:
-    """Read a stored file, re-validating the path so a tampered record cannot escape data_dir."""
-    return resolve_inside(data_dir, document.stored_path).read_bytes()
+    """Read a stored file (decrypting it if the library is encrypted).
+
+    The path is re-validated, so a tampered record cannot escape data_dir.
+    """
+    raw = resolve_inside(data_dir, document.stored_path).read_bytes()
+    if not looks_encrypted(raw, document.content_hash):
+        return raw
+    session = object_session(document)
+    vault = vault_of_session(session) if session is not None else None
+    if vault is None:
+        raise LibraryLockedError("this stored file is encrypted and no key is available to read it")
+    return vault.decrypt_bytes(raw, file_context(document.content_hash))

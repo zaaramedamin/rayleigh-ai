@@ -32,6 +32,15 @@
 - The LLM server address must be on this machine (`localhost`, `127.0.0.1` or `::1`); anything else is rejected at startup. Requests ignore system proxies and refuse redirects.
 - Questions, notes and answers are never written to logs.
 
+## Encryption at rest
+
+- `python -m app encrypt-library` encrypts note text, headings, file names and the stored copies of files with AES-256-GCM, using Windows' own cryptography (no extra dependency). Backups contain only the encrypted forms.
+- A random 256-bit library key is kept in `security.json`, wrapped twice: by the Windows account (automatic unlock) and by a recovery passphrase (scrypt, then AES-256-GCM). The key file is not secret on its own.
+- Every value is authenticated and bound to its column (or file name). A modified value fails to decrypt; a value moved to another column or file fails too.
+- Safe failure: an encrypted library is never opened without its key, never written to in plaintext, and a half-finished encryption is refused until it is resumed. A library that contains encrypted data but lost its key file is refused, not treated as plaintext.
+- Not covered: the search vectors (needed readable for search), structure such as sizes, line numbers and file hashes, malware running as the signed-in user, and plaintext that was on disk before encryption (see the README for `cipher /w`). Keys cannot be wiped from memory in Python.
+- A known limitation for later work: a keyword index (planned, SQLite full-text search) would store words in plaintext, so it must be built in memory or with a blind index when encryption is on.
+
 ## Threats to keep in mind
 
 - Path traversal through filenames.

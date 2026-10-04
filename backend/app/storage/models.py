@@ -1,8 +1,9 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.security.sqlalchemy_types import EncryptedString, EncryptedText
 from app.storage.database import Base
 
 
@@ -17,7 +18,9 @@ class Document(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     # Display only. Never used to build a filesystem path.
-    original_filename: Mapped[str] = mapped_column(String(255))
+    original_filename: Mapped[str] = mapped_column(
+        EncryptedString("documents.original_filename", 255)
+    )
     content_hash: Mapped[str] = mapped_column(String(64), unique=True)
     # Relative to DATA_DIR, always derived from content_hash.
     stored_path: Mapped[str] = mapped_column(String(255))
@@ -50,9 +53,11 @@ class Chunk(Base):
         ForeignKey("documents.id", ondelete="CASCADE"), index=True
     )
     chunk_index: Mapped[int] = mapped_column(Integer)
-    text: Mapped[str] = mapped_column(Text)
+    text: Mapped[str] = mapped_column(EncryptedText("chunks.text"))
     # e.g. "Project > Setup". Empty for text without headings.
-    heading_path: Mapped[str] = mapped_column(String(1000), default="")
+    heading_path: Mapped[str] = mapped_column(
+        EncryptedString("chunks.heading_path", 1000), default=""
+    )
     start_line: Mapped[int] = mapped_column(Integer)
     end_line: Mapped[int] = mapped_column(Integer)
     char_count: Mapped[int] = mapped_column(Integer)

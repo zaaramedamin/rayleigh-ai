@@ -1,6 +1,7 @@
 """Command-line interface: `python -m app <command>`. Run `python -m app --help` for the list."""
 
 import argparse
+import getpass
 import io
 import json
 import os
@@ -48,6 +49,9 @@ from app.knowledge.ingestion.service import IngestSummary, ingest_folders
 from app.knowledge.retrieval.service import RetrievedChunk, retrieve
 from app.operations.backup import BackupError, create_backup, restore_backup
 from app.operations.doctor import format_checks, run_doctor
+from app.security import keystore
+from app.security.errors import KeystoreError, SecurityError, WrongPassphraseError
+from app.security.migrate import encrypt_library
 from app.storage.database import create_db_engine
 from app.storage.migrations import database_is_up_to_date
 from app.storage.models import Chunk, Document
@@ -61,8 +65,48 @@ class CliError(Exception):
 Handler = Callable[[argparse.Namespace, Settings], int]
 
 
+PASSPHRASE_ENV = "REYLEIGHT_PASSPHRASE"
+NEW_PASSPHRASE_ENV = "REYLEIGHT_NEW_PASSPHRASE"
+
+
+def _ask_secret(prompt: str, env_name: str) -> str:
+    """A passphrase from an environment variable (for automation), or typed without echo."""
+    value = os.environ.get(env_name)
+    if value:
+        return value
+    if sys.stdin.isatty():
+        return getpass.getpass(prompt)
+    raise CliError(f"a passphrase is needed but this is not a terminal; set {env_name}")
+
+
+def _passphrase_for_unlock(settings: Settings, *, required: bool = True) -> str | None:
+    """The recovery passphrase, asked only if Windows cannot unlock the encrypted library."""
+    try:
+        if keystore.library_state(settings.data_dir) != "encrypted":
+            return None
+        if keystore.windows_unlock_works(settings.data_dir):
+            return None
+    except KeystoreError as exc:
+        raise CliError(str(exc)) from exc
+    try:
+        return _ask_secret("Recovery passphrase to unlock the library: ", PASSPHRASE_ENV)
+    except CliError:
+        if required:
+            raise
+        return None
+
+
 def _open_engine(settings: Settings) -> Engine:
-    engine = create_db_engine(settings.data_dir)
+    passphrase = _passphrase_for_unlock(settings)
+    try:
+        engine = create_db_engine(settings.data_dir, passphrase=passphrase)
+    except SecurityError as exc:
+        raise CliError(str(exc)) from exc
+    if passphrase is not None and keystore.windows_unlock_works(settings.data_dir):
+        print(
+            "Unlocked. Windows will now unlock this library automatically for your account.",
+            file=sys.stderr,
+        )
     if not database_is_up_to_date(engine):
         raise CliError(
             "database missing or out of date. Run `alembic upgrade head` from backend/ first."
@@ -437,7 +481,8 @@ def _cmd_offline_check(_args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
-    checks = run_doctor(settings, repair=args.fix, quick=args.quick)
+    passphrase = _passphrase_for_unlock(settings, required=False)
+    checks = run_doctor(settings, repair=args.fix, quick=args.quick, passphrase=passphrase)
     print(format_checks(checks))
     return 1 if any(c.status == "fail" for c in checks) else 0
 
@@ -464,7 +509,14 @@ def _cmd_backup(args: argparse.Namespace, settings: Settings) -> int:
     for warning in summary.warnings:
         print(f"warning: {warning}")
     print("The search vectors are not saved; after a restore run `python -m app index`.")
-    print("This file contains your private notes. Keep it somewhere safe.")
+    if summary.encrypted:
+        print("encryption:     yes (notes, headings and file names are encrypted in this backup)")
+        print("Restoring it on another computer needs your recovery passphrase.")
+    else:
+        print("encryption:     NO. This file contains your notes in readable form.")
+        print(
+            "Run `python -m app encrypt-library` first to protect your notes, then back up again."
+        )
     return 0
 
 
@@ -479,9 +531,168 @@ def _cmd_restore(args: argparse.Namespace, _settings: Settings) -> int:
     print(f"chunks:         {summary.chunks}")
     print(f"stored files:   {summary.files}")
     print("checksums verified; nothing is searchable until you run `python -m app index`.")
+    if summary.encrypted:
+        print("This library is encrypted: the first command that opens it asks for the recovery")
+        print("passphrase (unless this Windows account can unlock it).")
     print(f"To use it, set DATA_DIR={summary.target} (in .env or the environment)")
     if summary.needs_migration:
         print("then run `alembic upgrade head`: this backup is from an older version.")
+    return 0
+
+
+def _choose_new_passphrase() -> str:
+    """Ask for a new recovery passphrase: typed twice, or a generated random key."""
+    value = os.environ.get(NEW_PASSPHRASE_ENV)
+    if value:
+        return value
+    if not sys.stdin.isatty():
+        raise CliError(
+            f"a passphrase is needed but this is not a terminal; set {NEW_PASSPHRASE_ENV}"
+        )
+    print("Choose a recovery passphrase. It unlocks your library on another computer, or if")
+    print("Windows is reinstalled. Without it (and this Windows account) the data is gone.")
+    print(f"Use {keystore.MIN_PASSPHRASE_LENGTH}+ characters, or press Enter for a random key.")
+    while True:
+        first = getpass.getpass("Recovery passphrase (Enter = generate one): ")
+        if not first:
+            key = keystore.generate_recovery_passphrase()
+            print("")
+            print("Your recovery key. Write it down and keep it away from this computer:")
+            print(f"    {key}")
+            again = getpass.getpass("Type the key again to confirm you wrote it down: ")
+            if keystore.normalize_passphrase(key) in keystore.passphrase_candidates(again):
+                return key
+            print("That did not match. Starting again.")
+            continue
+        try:
+            keystore.validate_new_passphrase(first)
+        except ValueError as exc:
+            print(f"{exc}. Try again.")
+            continue
+        if getpass.getpass("Type it again: ") != first:
+            print("The two did not match. Try again.")
+            continue
+        return first
+
+
+def _cmd_encrypt_library(args: argparse.Namespace, settings: Settings) -> int:
+    data_dir = settings.data_dir
+    try:
+        state = keystore.library_state(data_dir)
+    except KeystoreError as exc:
+        raise CliError(str(exc)) from exc
+    if state == "encrypted":
+        print("This library is already encrypted.")
+        return 0
+
+    if state == "migrating":
+        print("A previous encryption was not finished. It will be resumed.")
+    else:
+        print("This will encrypt your library with AES-256-GCM:")
+        print("  - note text, headings and file names in the database")
+        print("  - the stored copies of your files")
+        print("  - backups made afterwards (they hold only the encrypted forms)")
+        print("The search vectors stay readable because search needs them (BitLocker for the")
+        print("drive protects those). Stop the API server and any other Reyleight program first.")
+        if not args.no_backup:
+            print("A backup of the current (unencrypted) library is made first.")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise CliError("this changes your library; run it in a terminal, or add --yes")
+        if input("Continue? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Nothing was changed.")
+            return 0
+
+    if state == "migrating":
+        passphrase = (
+            ""
+            if keystore.windows_unlock_works(data_dir)
+            else _ask_secret("Recovery passphrase: ", PASSPHRASE_ENV)
+        )
+    else:
+        passphrase = _choose_new_passphrase()
+    backup_to = None if args.no_backup or state == "migrating" else _default_backup_path()
+    try:
+        report = encrypt_library(
+            data_dir,
+            passphrase,
+            backup_to=backup_to,
+            progress=lambda message: print(f"  {message}"),
+        )
+    except (SecurityError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+
+    print("")
+    print("The library is encrypted.")
+    print(f"  values encrypted: {report.values_encrypted}")
+    print(f"  stored files encrypted: {report.files_encrypted}")
+    for warning in sorted(set(report.warnings)):
+        print(f"  warning: {warning}")
+    print("Next steps:")
+    print("  1. Run `python -m app recovery-check` to confirm your recovery passphrase works.")
+    print("  2. Run `python -m app doctor`, then try a search or question.")
+    if report.backup_path is not None:
+        print(f"  3. Delete the safety backup once you are satisfied: {report.backup_path}")
+        print("     (it is the unencrypted original, so it is not protected)")
+    print("Data written to disk before today may survive in unused disk space. To overwrite it,")
+    print(f"run: cipher /w:{data_dir}   (Windows built-in; it takes a while)")
+    return 0
+
+
+def _cmd_security(_args: argparse.Namespace, settings: Settings) -> int:
+    data_dir = settings.data_dir
+    try:
+        keyfile = keystore.read_keyfile(data_dir)
+    except KeystoreError as exc:
+        raise CliError(str(exc)) from exc
+    if keyfile is None:
+        print("encryption:     off (the library is not encrypted)")
+        print("Run `python -m app encrypt-library` to encrypt it.")
+        return 0
+    windows = keystore.windows_unlock_works(data_dir)
+    print(f"encryption:     {keyfile.state}")
+    print("cipher:         AES-256-GCM (Windows cryptography)")
+    print(f"key file:       {data_dir / keystore.SECURITY_FILENAME}")
+    print(f"created:        {keyfile.created_at}")
+    if windows:
+        print("windows unlock: works for this account")
+    else:
+        print("windows unlock: does NOT work; the recovery passphrase is needed")
+    print(f"passphrase kdf: scrypt (n={keyfile.kdf_n}, r={keyfile.kdf_r}, p={keyfile.kdf_p})")
+    print("Run `python -m app recovery-check` to confirm the recovery passphrase still works.")
+    return 0
+
+
+def _cmd_recovery_check(_args: argparse.Namespace, settings: Settings) -> int:
+    try:
+        passphrase = _ask_secret("Recovery passphrase to check: ", PASSPHRASE_ENV)
+        result = keystore.check_recovery(settings.data_dir, passphrase)
+    except SecurityError as exc:
+        raise CliError(str(exc)) from exc
+    print(f"recovery passphrase: {'correct' if result.passphrase_works else 'NOT correct'}")
+    print(f"windows unlock:      {'works' if result.windows_unlock_works else 'does not work'}")
+    if result.same_key_as_windows is not None:
+        same = "yes" if result.same_key_as_windows else "NO (something is wrong)"
+        print(f"same key as Windows: {same}")
+    ok = result.passphrase_works and result.same_key_as_windows is not False
+    return 0 if ok else 1
+
+
+def _cmd_change_passphrase(_args: argparse.Namespace, settings: Settings) -> int:
+    data_dir = settings.data_dir
+    try:
+        if keystore.library_state(data_dir) != "encrypted":
+            raise CliError("the library is not encrypted")
+        unlocked = keystore.unlock(data_dir, passphrase=_passphrase_for_unlock(settings))
+        new_passphrase = _choose_new_passphrase()
+        keystore.change_passphrase(data_dir, unlocked.vault, new_passphrase)
+    except WrongPassphraseError as exc:
+        raise CliError(str(exc)) from exc
+    except (SecurityError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    print("The recovery passphrase was changed. The old one no longer works.")
+    print("Run `python -m app recovery-check` to confirm the new one, and update any old backups'")
+    print("passphrase notes: backups made before today still need the OLD passphrase.")
     return 0
 
 
@@ -559,6 +770,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "for example to test real questions kept outside git",
     )
     add("offline-check", _cmd_offline_check, "run the pipeline with all non-local network blocked")
+    encrypt = add(
+        "encrypt-library",
+        _cmd_encrypt_library,
+        "encrypt the library (notes, headings, file names, files)",
+    )
+    encrypt.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    encrypt.add_argument(
+        "--no-backup", action="store_true", help="skip the safety backup (not recommended)"
+    )
+    add("security", _cmd_security, "show whether the library is encrypted and how it unlocks")
+    add("recovery-check", _cmd_recovery_check, "check that your recovery passphrase unlocks it")
+    add("change-passphrase", _cmd_change_passphrase, "set a new recovery passphrase")
     doctor = add("doctor", _cmd_doctor, "check the whole setup and say how to fix problems")
     doctor.add_argument(
         "--fix", action="store_true", help="safe repairs only: mark for re-indexing"
@@ -596,6 +819,9 @@ def main(argv: list[str] | None = None, settings: Settings | None = None) -> int
             code: int = args.handler(args, settings)
             return code
         except CliError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except SecurityError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
 

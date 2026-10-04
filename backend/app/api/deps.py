@@ -19,6 +19,7 @@ from app.ai.embeddings.base import (
 from app.ai.llm.base import LLMProvider
 from app.core.config import Settings, get_settings
 from app.knowledge.components import create_llm, create_vector_store, load_embedder
+from app.security.errors import LibraryLockedError, SecurityError
 from app.storage.database import create_db_engine
 from app.storage.migrations import database_is_up_to_date
 from app.storage.vector_store import VectorStore, VectorStoreError
@@ -40,7 +41,15 @@ def _unavailable(detail: str) -> HTTPException:
 
 
 def get_session(settings: SettingsDep) -> Iterator[Session]:
-    engine = _engine(settings.data_dir)
+    try:
+        engine = _engine(settings.data_dir)
+    except LibraryLockedError as exc:
+        raise _unavailable(
+            "The library is encrypted and locked. Run any `python -m app` command in a terminal "
+            "and enter the recovery passphrase once; the server then unlocks it automatically."
+        ) from exc
+    except SecurityError as exc:
+        raise _unavailable(str(exc)) from exc
     if not database_is_up_to_date(engine):
         raise _unavailable("Database missing or out of date. Run `alembic upgrade head`.")
     with Session(engine) as session:

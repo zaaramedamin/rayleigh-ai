@@ -602,7 +602,7 @@ def test_backup_and_restore_commands_round_trip(
     out = capsys.readouterr().out
     assert "backup saved:" in out
     assert "documents:      2" in out
-    assert "private notes" in out
+    assert "notes in readable form" in out
 
     restored = tmp_path / "restored"
     assert main(["restore", str(archive), "--to", str(restored)], settings=settings) == 0
