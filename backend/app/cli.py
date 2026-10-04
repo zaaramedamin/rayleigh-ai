@@ -8,6 +8,7 @@ import socket
 import sys
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -45,6 +46,8 @@ from app.knowledge.indexing.service import (
 from app.knowledge.ingestion.file_types import FILE_TYPES
 from app.knowledge.ingestion.service import IngestSummary, ingest_folders
 from app.knowledge.retrieval.service import RetrievedChunk, retrieve
+from app.operations.backup import BackupError, create_backup, restore_backup
+from app.operations.doctor import format_checks, run_doctor
 from app.storage.database import create_db_engine
 from app.storage.migrations import database_is_up_to_date
 from app.storage.models import Chunk, Document
@@ -331,7 +334,7 @@ def _evaluation_inputs(args: argparse.Namespace, settings: Settings) -> tuple[in
 def _cmd_eval(args: argparse.Namespace, settings: Settings) -> int:
     chunk_size, chunk_overlap, top_k, min_score = _evaluation_inputs(args, settings)
     try:
-        dataset = load_dataset()
+        dataset = load_dataset(Path(args.set)) if args.set else load_dataset()
     except DatasetError as exc:
         raise CliError(f"evaluation set problem: {exc}") from exc
     embedder = _load_embedder(settings)
@@ -433,6 +436,55 @@ def _cmd_offline_check(_args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
+    checks = run_doctor(settings, repair=args.fix, quick=args.quick)
+    print(format_checks(checks))
+    return 1 if any(c.status == "fail" for c in checks) else 0
+
+
+def _default_backup_path() -> Path:
+    """A new file under the local application data folder: outside the repository and not synced."""
+    base = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return base / "Reyleight" / "backups" / f"reyleight-backup-{stamp}.zip"
+
+
+def _cmd_backup(args: argparse.Namespace, settings: Settings) -> int:
+    destination = Path(args.to) if args.to else _default_backup_path()
+    try:
+        summary = create_backup(settings.data_dir, destination)
+    except BackupError as exc:
+        raise CliError(str(exc)) from exc
+    print(f"backup saved:   {summary.path}")
+    print(f"documents:      {summary.documents}")
+    print(f"chunks:         {summary.chunks}")
+    print(f"stored files:   {summary.files}")
+    print(f"size:           {summary.archive_bytes / (1024 * 1024):.1f} MB")
+    print(f"schema version: {summary.schema_revision}")
+    for warning in summary.warnings:
+        print(f"warning: {warning}")
+    print("The search vectors are not saved; after a restore run `python -m app index`.")
+    print("This file contains your private notes. Keep it somewhere safe.")
+    return 0
+
+
+def _cmd_restore(args: argparse.Namespace, _settings: Settings) -> int:
+    target = Path(args.to)
+    try:
+        summary = restore_backup(Path(args.archive), target)
+    except BackupError as exc:
+        raise CliError(str(exc)) from exc
+    print(f"restored to:    {summary.target}")
+    print(f"documents:      {summary.documents}")
+    print(f"chunks:         {summary.chunks}")
+    print(f"stored files:   {summary.files}")
+    print("checksums verified; nothing is searchable until you run `python -m app index`.")
+    print(f"To use it, set DATA_DIR={summary.target} (in .env or the environment)")
+    if summary.needs_migration:
+        print("then run `alembic upgrade head`: this backup is from an older version.")
+    return 0
+
+
 def _cmd_download_model(_args: argparse.Namespace, settings: Settings) -> int:
     target = model_dir_for(settings.models_dir, settings.embedding_model)
     if is_model_downloaded(settings.models_dir, settings.embedding_model):
@@ -500,7 +552,25 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--chunk-overlap", type=int, help="try another chunk overlap")
     evaluate.add_argument("--min-score", type=float, help="try another ANSWER_MIN_SCORE")
     evaluate.add_argument("--output", metavar="FILE", help="also write full results as JSON")
+    evaluate.add_argument(
+        "--set",
+        metavar="FOLDER",
+        help="use your own evaluation set (a folder with corpus/ and questions.json), "
+        "for example to test real questions kept outside git",
+    )
     add("offline-check", _cmd_offline_check, "run the pipeline with all non-local network blocked")
+    doctor = add("doctor", _cmd_doctor, "check the whole setup and say how to fix problems")
+    doctor.add_argument(
+        "--fix", action="store_true", help="safe repairs only: mark for re-indexing"
+    )
+    doctor.add_argument("--quick", action="store_true", help="skip verifying stored-file checksums")
+    backup = add("backup", _cmd_backup, "save the library (database and files) to one archive")
+    backup.add_argument(
+        "--to", metavar="FILE", help="where to write the archive (never overwritten)"
+    )
+    restore = add("restore", _cmd_restore, "restore a backup archive into an empty folder")
+    restore.add_argument("archive", help="the backup archive to restore")
+    restore.add_argument("--to", metavar="FOLDER", required=True, help="an empty folder")
     add("types", _cmd_types, "list supported file types")
     add("download-model", _cmd_download_model, "download the embedding model (needs internet)")
     return parser

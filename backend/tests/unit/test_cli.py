@@ -1,3 +1,4 @@
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -580,3 +581,198 @@ def test_the_offline_flag_fails_a_command_that_reaches_outside(
     assert main(["--offline", "types"], settings=make_settings()) == 1
 
     assert "203.0.113.5:443" in capsys.readouterr().err
+
+
+# --- backup and restore -------------------------------------------------------------------------
+
+
+def test_backup_and_restore_commands_round_trip(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    notes: Path,
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(allowed_folders=[notes])
+    main(["ingest"], settings=settings)
+    capsys.readouterr()
+    archive = tmp_path / "saved" / "library.zip"
+
+    assert main(["backup", "--to", str(archive)], settings=settings) == 0
+    out = capsys.readouterr().out
+    assert "backup saved:" in out
+    assert "documents:      2" in out
+    assert "private notes" in out
+
+    restored = tmp_path / "restored"
+    assert main(["restore", str(archive), "--to", str(restored)], settings=settings) == 0
+    out = capsys.readouterr().out
+    assert "checksums verified" in out
+    assert f"DATA_DIR={restored}" in out
+    assert (restored / "reyleight.db").is_file()
+
+
+def test_backup_refuses_to_overwrite_and_reports_it(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "library.zip"
+    assert main(["backup", "--to", str(archive)], settings=make_settings()) == 0
+    capsys.readouterr()
+
+    assert main(["backup", "--to", str(archive)], settings=make_settings()) == 1
+
+    assert "already exists" in capsys.readouterr().err
+
+
+def test_backup_without_a_library_explains_itself(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    assert main(["backup", "--to", str(tmp_path / "x.zip")], settings=make_settings()) == 1
+
+    assert "no library found" in capsys.readouterr().err
+
+
+def test_restore_into_a_non_empty_folder_is_refused(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "library.zip"
+    main(["backup", "--to", str(archive)], settings=make_settings())
+    capsys.readouterr()
+    busy = tmp_path / "busy"
+    busy.mkdir()
+    (busy / "file.txt").write_text("x")
+
+    assert main(["restore", str(archive), "--to", str(busy)], settings=make_settings()) == 1
+
+    assert "not empty" in capsys.readouterr().err
+
+
+def test_restore_requires_a_target(make_settings: MakeSettings, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["restore", str(tmp_path / "a.zip")], settings=make_settings())
+
+    assert exc.value.code == 2
+
+
+def test_the_default_backup_location_is_outside_the_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+
+    path = cli._default_backup_path()
+
+    assert path.parent == tmp_path / "appdata" / "Reyleight" / "backups"
+    assert path.name.startswith("reyleight-backup-") and path.suffix == ".zip"
+
+
+# --- doctor ---------------------------------------------------------------------------------
+
+
+def test_doctor_reports_a_healthy_library_and_exits_zero(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    notes: Path,
+    fake_model: HashingEmbedder,
+) -> None:
+    settings = make_settings(allowed_folders=[notes])
+    main(["ingest"], settings=settings)
+    capsys.readouterr()
+
+    assert main(["doctor"], settings=settings) == 0
+
+    out = capsys.readouterr().out
+    assert "OK    database" in out
+    assert "OK    stored files" in out
+    assert "0 failure(s)" in out
+
+
+def test_doctor_exits_one_and_names_the_fix_when_something_is_broken(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings
+) -> None:
+    assert main(["doctor"], settings=make_settings()) == 1
+
+    out = capsys.readouterr().out
+    assert "FAIL  database" in out
+    assert "fix: alembic upgrade head" in out
+
+
+def test_doctor_accepts_fix_and_quick(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings, migrated_data_dir: Path
+) -> None:
+    assert main(["doctor", "--fix", "--quick"], settings=make_settings()) in (0, 1)
+
+    assert "failure(s)" in capsys.readouterr().out
+
+
+# --- a custom evaluation set --------------------------------------------------------------------
+
+
+def _write_eval_set(folder: Path) -> Path:
+    (folder / "corpus").mkdir(parents=True)
+    (folder / "corpus" / "garden.md").write_text("# Garden\n\nTomatoes need watering daily.\n")
+    (folder / "corpus" / "bikes.txt").write_text("The red bike has a flat tyre.")
+    (folder / "questions.json").write_text(
+        json.dumps(
+            {
+                "questions": [
+                    {
+                        "id": "tomatoes",
+                        "type": "answerable",
+                        "question": "How often do tomatoes need watering?",
+                        "expected_sources": [{"file": "garden.md"}],
+                        "answer_contains": [["daily"]],
+                    },
+                    {"id": "capital", "type": "unanswerable", "question": "Capital of Peru?"},
+                ]
+            }
+        )
+    )
+    return folder
+
+
+def test_eval_can_use_a_custom_set_from_anywhere(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    fake_model: HashingEmbedder,
+    tmp_path: Path,
+) -> None:
+    eval_set = _write_eval_set(tmp_path / "my-set")
+
+    assert main(["eval", "--set", str(eval_set)], settings=make_settings()) == 0
+
+    out = capsys.readouterr().out
+    assert "corpus: 2 documents" in out  # the custom corpus, not the built-in 12 notes
+    assert "RETRIEVAL  (1 questions" in out
+
+
+def test_eval_reports_a_broken_custom_set_clearly(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    fake_model: HashingEmbedder,
+    tmp_path: Path,
+) -> None:
+    assert main(["eval", "--set", str(tmp_path / "nope")], settings=make_settings()) == 1
+
+    assert "evaluation set problem: corpus folder not found" in capsys.readouterr().err
+
+
+def test_a_custom_set_never_touches_the_users_library(
+    make_settings: MakeSettings,
+    fake_model: HashingEmbedder,
+    tmp_path: Path,
+    data_dir: Path,
+) -> None:
+    eval_set = _write_eval_set(tmp_path / "my-set")
+    before = sorted(p.name for p in eval_set.rglob("*"))
+
+    main(["eval", "--set", str(eval_set)], settings=make_settings())
+
+    assert not data_dir.exists()
+    assert sorted(p.name for p in eval_set.rglob("*")) == before  # the set itself is unchanged

@@ -235,3 +235,20 @@ def test_chunk_settings_are_applied_during_ingestion(
 
     assert summary.chunks_created > 3
     assert all(c.char_count <= 200 for c in session.scalars(select(Chunk)))
+
+
+def test_reingesting_recreates_a_stored_copy_that_went_missing(
+    session: Session, data_dir: Path, allowed: Path
+) -> None:
+    (allowed / "a.md").write_text("# T\n\nbody\n")
+    ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+    document = session.scalars(select(Document)).one()
+    stored = data_dir / document.stored_path
+    stored.unlink()
+
+    summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
+
+    assert summary.unchanged == 1
+    assert summary.added == 0
+    assert stored.read_bytes() == (allowed / "a.md").read_bytes()
+    assert session.scalar(select(func.count()).select_from(Document)) == 1

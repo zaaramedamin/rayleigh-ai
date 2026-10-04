@@ -30,7 +30,8 @@ Requires Python 3.11+. From the repo root:
 cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
+pip install -r requirements.lock  # the exact, tested versions of every dependency
+pip install --no-deps -e .         # the project itself
 
 alembic upgrade head              # create/update the SQLite database in DATA_DIR
 python -m app download-model      # one time: download the embedding model into MODELS_DIR
@@ -39,9 +40,27 @@ python -m app ingest              # ingest supported files from ALLOWED_FOLDERS,
 uvicorn app.main:app --reload     # API on http://127.0.0.1:8000 (docs at /docs)
 pytest                            # tests
 ruff check . ; ruff format --check .
+mypy                              # strict type checking of app/ (configured in pyproject.toml)
 ```
 
 Set `ALLOWED_FOLDERS` (comma-separated) and `MAX_FILE_SIZE_MB` in `.env`. Only those folders are ever read.
+
+### Dependencies and the lock file
+
+`backend/pyproject.toml` lists what the project needs; `backend/requirements.lock` pins the exact version of everything that gets installed, so a rebuild on another day gives the same result. It was generated for Python 3.13 on Windows and records the versions the whole test suite was run against.
+
+To change a version: install it in your working environment, run `pytest`, `ruff check .` and `mypy`, and only then record it:
+
+```powershell
+pip install pip-tools                      # a tool, not a project dependency
+cd backend
+pip freeze --exclude-editable > tested.txt # the versions you just tested (delete pip and setuptools lines)
+pip-compile pyproject.toml --extra dev --strip-extras --no-emit-index-url --constraint tested.txt --output-file requirements.lock
+```
+
+The `--constraint` matters: without it, `pip-compile` picks the newest version of everything, which is not what you tested. Remove the `-c tested.txt` lines `pip-compile` adds, so no local path ends up in the file, and delete `tested.txt`. The lock pins versions but not file hashes: hashing every platform's wheels means downloading gigabytes of PyTorch builds that are never used.
+
+**Windows Smart App Control** can block the compiled files of a package version it has not seen before ("An Application Control policy has blocked this file"). This happened for `scikit-learn` (a placeholder is used, see Troubleshooting), for mypy's native parser (`native_parser = false` in `pyproject.toml`), and for a newer SQLAlchemy than the one that was tested. If a rebuild is blocked, installing the exact locked versions is the fix, and re-running while online sometimes clears it.
 
 ### Commands
 
@@ -58,6 +77,9 @@ Set `ALLOWED_FOLDERS` (comma-separated) and `MAX_FILE_SIZE_MB` in `.env`. Only t
 | `check-llm` | Send a test prompt to the local LLM (Ollama) |
 | `eval` | Measure retrieval and answer quality on a built-in test set (`--answers`, `--chunk-size`, `--min-score`, `--output`) |
 | `offline-check` | Run the whole pipeline with all non-local network access blocked, and report any attempt |
+| `doctor` | Check the whole setup and say how to fix each problem (`--quick`, `--fix`) |
+| `backup` | Save the library (database and stored files) to one verified archive |
+| `restore` | Restore a backup archive into an empty folder, after verifying every checksum |
 | `types` | List supported file types |
 | `download-model` | Download the embedding model (the only command that uses the internet) |
 
@@ -110,6 +132,14 @@ python -m app eval --answers
 ```
 
 Runs 37 questions with known answers (some answerable, some not, one with a hidden instruction) against 12 made-up notes, in a throwaway library that never touches your data. Measured on 2026-10-03: the right note ranked first for 27 of 27 questions, 24 of 26 answerable questions were answered correctly with a valid citation, 10 of 10 unanswerable ones were refused, and the hidden instruction was ignored. The two wrong answers were mistakes by the small model. Details, how to read the report and how to add your own questions: [docs/evaluation.md](docs/evaluation.md).
+
+To test **your own questions about your real notes**, make a folder with the same layout as `backend/eval/` (a `corpus/` folder of notes and a `questions.json`) and point `eval` at it:
+
+```powershell
+python -m app eval --set C:\path\to\my-eval-set --answers
+```
+
+Keep that folder **outside the repository**, or in `eval-private/`, which git ignores: it contains your real notes. The evaluation copies the folder into a temporary library, never reads outside it, and never changes your own library.
 
 ### Proving it works offline
 
@@ -170,6 +200,20 @@ Each stored document is split into chunks, so answers can later cite an exact lo
 - Line numbers refer to the extracted text. They match the original file for text and Markdown, but not for HTML, where tags are removed.
 - Overlap is made of whole lines, so it can be smaller than `CHUNK_OVERLAP_CHARS`, or absent when lines are long.
 - Size and overlap (characters) are `CHUNK_SIZE_CHARS` and `CHUNK_OVERLAP_CHARS` in `.env`. After changing them, run `--rechunk`.
+
+## Checking and protecting your library
+
+```powershell
+python -m app doctor            # is everything healthy? read-only; says how to fix each problem
+python -m app backup            # save the library to one archive (see below for where)
+python -m app restore FILE --to C:\restored-library
+```
+
+**`doctor`** checks the database version, that every stored file exists and matches its checksum, that the search index agrees with the database, the allowed folders, free disk space, the embedding model, Ollama, and Windows Smart App Control. It exits with code 1 only if something has failed. It changes nothing; `--fix` does one safe thing (marks documents for re-indexing when the search index disagrees with the database) and never deletes anything. `--quick` skips verifying checksums, which is faster for large libraries.
+
+**`backup`** writes one `.zip` containing the database (copied with SQLite's own backup method, so it is consistent even while the library is in use), the stored copies of your files, and a manifest with a SHA-256 checksum of every entry. By default it goes to `%LOCALAPPDATA%\Reyleight\backups` (outside the repository and not synced); choose another place with `--to FILE`. It never overwrites a file and refuses to save inside the data folder it protects. The search vectors are not included, because `python -m app index` rebuilds them. **A backup contains your private notes**, so keep it somewhere safe.
+
+**`restore`** verifies every checksum before writing anything, refuses an archive that has unexpected or unsafe entries, refuses to restore into a folder that is not empty, never touches your current library, and marks everything as "not searchable yet". To use the restored library, set `DATA_DIR` to that folder and run `python -m app index`.
 
 ## Troubleshooting
 
