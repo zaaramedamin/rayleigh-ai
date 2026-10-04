@@ -226,9 +226,22 @@ class QdrantVectorStore:
         return self._client.count(self._collection, count_filter=count_filter, exact=True).count
 
     def reset(self) -> None:
-        """Delete every vector in this collection."""
-        self._client.delete_collection(self._collection)
-        self._ensure_collection()
+        """Delete every vector in this collection.
+
+        The points are deleted, not the collection: in Qdrant's on-disk mode, deleting a
+        collection and creating it again under the same name brings the old points back.
+        """
+        while True:
+            points, _ = self._client.scroll(
+                self._collection, limit=1000, with_payload=False, with_vectors=False
+            )
+            if not points:
+                return
+            self._client.delete(
+                self._collection,
+                points_selector=models.PointIdsList(points=[p.id for p in points]),
+                wait=True,
+            )
 
     def close(self) -> None:
         self._client.close()

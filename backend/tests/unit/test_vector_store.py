@@ -123,6 +123,30 @@ def test_reset_removes_every_vector(store: QdrantVectorStore) -> None:
     assert store.count() == 1
 
 
+def test_reset_really_empties_the_on_disk_store_and_stays_empty_after_reopening(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "qdrant"
+    with QdrantVectorStore.open_local(path, "c", DIM) as store:
+        store.upsert([_point(1, i, X) for i in range(5)])
+        assert store.count() == 5
+        store.reset()
+        assert store.count() == 0
+
+    with QdrantVectorStore.open_local(path, "c", DIM) as reopened:
+        assert reopened.count() == 0
+        reopened.upsert([_point(2, 0, Y)])
+        assert reopened.count() == 1
+
+
+def test_reset_handles_more_points_than_one_batch(store: QdrantVectorStore) -> None:
+    store.upsert([_point(1, i, X) for i in range(1500)])
+
+    store.reset()
+
+    assert store.count() == 0
+
+
 def test_upserting_nothing_is_a_no_op(store: QdrantVectorStore) -> None:
     store.upsert([])
 
