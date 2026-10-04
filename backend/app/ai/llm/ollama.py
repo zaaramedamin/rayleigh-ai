@@ -6,9 +6,12 @@ import re
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from typing import Any
 
 from app.ai.llm.base import (
+    ChatMessage,
+    ChatReply,
     LLMError,
     LLMModelNotFoundError,
     LLMTimeoutError,
@@ -116,16 +119,27 @@ class OllamaProvider:
     # --- API ----------------------------------------------------------------------------------
 
     def generate(self, system: str, user: str) -> str:
+        # Temperature 0: the same notes and question should give the same answer.
+        return self._complete(system, [ChatMessage("user", user)], temperature=0).text
+
+    def chat(
+        self, system: str, messages: Sequence[ChatMessage], *, temperature: float = 0.0
+    ) -> ChatReply:
+        return self._complete(system, messages, temperature=temperature)
+
+    def _complete(
+        self, system: str, messages: Sequence[ChatMessage], *, temperature: float
+    ) -> ChatReply:
         body: dict[str, Any] = {
             "model": self.model_name,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                *({"role": message.role, "content": message.content} for message in messages),
             ],
             "stream": False,
             "think": self._think,
             "options": {
-                "temperature": 0,  # the same notes and question should give the same answer
+                "temperature": temperature,
                 "num_ctx": self._num_ctx,
                 "num_predict": 4096 if self._think else 1024,  # bound a runaway answer
             },
@@ -145,8 +159,9 @@ class OllamaProvider:
         if not isinstance(content, str):
             raise LLMError("Ollama returned a response without a message")
         content = _THINK_BLOCK.sub("", content).strip()
+        truncated = data.get("done_reason") == "length"
         if not content:
-            if data.get("done_reason") == "length":
+            if truncated:
                 raise LLMError(
                     "the model used up its whole answer budget before writing an answer"
                     + (" while reasoning; set LLM_THINK=false" if self._think else "")
@@ -159,7 +174,7 @@ class OllamaProvider:
             time.monotonic() - started,
             len(content),
         )
-        return content
+        return ChatReply(text=content, truncated=truncated)
 
     def list_models(self) -> list[str]:
         """Names of the models installed in Ollama. Raises LLMUnavailableError if it is down."""

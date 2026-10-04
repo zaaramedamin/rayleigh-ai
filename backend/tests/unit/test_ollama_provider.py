@@ -11,6 +11,8 @@ from typing import Any
 import pytest
 
 from app.ai.llm.base import (
+    ChatMessage,
+    ChatReply,
     LLMError,
     LLMModelNotFoundError,
     LLMTimeoutError,
@@ -103,6 +105,42 @@ def test_generate_returns_the_reply_and_sends_a_deterministic_chat_request(
     assert body["stream"] is False
     assert body["think"] is False
     assert body["options"]["temperature"] == 0
+
+
+def test_chat_sends_the_whole_conversation_at_the_requested_temperature(
+    ollama: FakeOllama,
+) -> None:
+    ollama.respond = lambda _p, _b: (200, {**_chat(" In France. "), "done_reason": "stop"})
+    conversation = [
+        ChatMessage("user", "Hello"),
+        ChatMessage("assistant", "Hi."),
+        ChatMessage("user", "Where is Paris?"),
+    ]
+
+    reply = _provider(ollama).chat("Be brief.", conversation, temperature=0.6)
+
+    assert reply == ChatReply("In France.", truncated=False)
+    method, path, body = ollama.requests[0]
+    assert (method, path) == ("POST", "/api/chat")
+    assert body is not None
+    assert body["messages"] == [
+        {"role": "system", "content": "Be brief."},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi."},
+        {"role": "user", "content": "Where is Paris?"},
+    ]
+    assert body["options"]["temperature"] == 0.6
+    assert body["stream"] is False
+
+
+def test_a_reply_cut_off_at_the_length_limit_is_flagged(ollama: FakeOllama) -> None:
+    ollama.respond = lambda _p, _b: (200, {**_chat("The first half of"), "done_reason": "length"})
+    provider = _provider(ollama)
+
+    assert provider.chat("s", [ChatMessage("user", "u")]) == ChatReply(
+        "The first half of", truncated=True
+    )
+    assert provider.generate("s", "u") == "The first half of"
 
 
 def test_reasoning_text_is_never_part_of_the_answer(ollama: FakeOllama) -> None:

@@ -3,6 +3,8 @@ import math
 import re
 from collections.abc import Sequence
 
+from app.ai.llm.base import ChatMessage, ChatReply
+
 
 class HashingEmbedder:
     """Deterministic stand-in for a real embedding model, for fast offline tests.
@@ -50,12 +52,22 @@ class FakeLLM:
         self.model_name = model_name
         self.installed = list(installed)
         self.calls: list[tuple[str, str]] = []
+        self.chats: list[tuple[str, list[ChatMessage], float]] = []
+        self.truncated = False
 
     def generate(self, system: str, user: str) -> str:
         self.calls.append((system, user))
         if self.error is not None:
             raise self.error
         return self.reply
+
+    def chat(
+        self, system: str, messages: Sequence[ChatMessage], *, temperature: float = 0.0
+    ) -> ChatReply:
+        self.chats.append((system, list(messages), temperature))
+        if self.error is not None:
+            raise self.error
+        return ChatReply(text=self.reply, truncated=self.truncated)
 
     def list_models(self) -> list[str]:
         if self.error is not None:
