@@ -1,7 +1,9 @@
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import ConnectionPoolEntry
 
 DB_FILENAME = "reyleight.db"
 
@@ -20,7 +22,9 @@ def create_db_engine(data_dir: Path) -> Engine:
     engine = create_engine(database_url(data_dir))
 
     @event.listens_for(engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
+    def _enable_foreign_keys(
+        dbapi_connection: DBAPIConnection, _connection_record: ConnectionPoolEntry
+    ) -> None:
         # SQLite ignores foreign keys (and ON DELETE CASCADE) unless this is enabled per connection.
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")

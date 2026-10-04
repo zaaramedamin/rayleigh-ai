@@ -18,6 +18,7 @@ dev = [
     "pytest",
     "httpx2",
     "ruff",
+    "mypy",
 ]
 
 [build-system]
@@ -41,3 +42,12 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.ruff.lint.isort]
 # backend/alembic/ is the migrations folder; the `alembic` import is the third-party library.
 known-third-party = ["alembic"]
+
+[tool.mypy]
+# Strict checking of the application. Run from backend/: `mypy app` (see README).
+python_version = "3.13"
+strict = true
+files = ["app"]
+# mypy's native parser is a compiled extension that Windows Smart App Control can block
+# ("An Application Control policy has blocked this file"). The pure-Python parser is used instead.
+native_parser = false

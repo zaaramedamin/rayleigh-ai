@@ -65,8 +65,8 @@ def chunk_text(
     sections = _split_sections(lines) if markdown else [_Section("", 1, lines)]
 
     chunks: list[ChunkData] = []
-    for section in sections:
-        section = _trim(section)
+    for raw_section in sections:
+        section = _trim(raw_section)
         if section is None or _is_heading_only(section, markdown):
             continue
         for start_line, end_line, chunk_text_ in _chunk_section(

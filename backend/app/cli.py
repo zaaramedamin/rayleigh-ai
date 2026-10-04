@@ -1,6 +1,7 @@
 """Command-line interface: `python -m app <command>`. Run `python -m app --help` for the list."""
 
 import argparse
+import io
 import json
 import os
 import socket
@@ -507,10 +508,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None, settings: Settings | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    try:
-        sys.stdout.reconfigure(errors="replace")  # never crash on characters the console lacks
-    except (AttributeError, ValueError):
-        pass
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        # never crash on characters the console cannot show
+        sys.stdout.reconfigure(errors="replace")
     try:
         settings = settings or get_settings()
     except ValidationError as exc:
@@ -523,7 +523,8 @@ def main(argv: list[str] | None = None, settings: Settings | None = None) -> int
 
     def run() -> int:
         try:
-            return args.handler(args, settings)
+            code: int = args.handler(args, settings)
+            return code
         except CliError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1

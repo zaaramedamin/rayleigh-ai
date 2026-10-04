@@ -11,6 +11,7 @@ three scikit-learn modules involved. We never try to load the blocked file or ch
 setting. Calling any scikit-learn function through the placeholder raises a clear error.
 """
 
+import importlib
 import importlib.machinery
 import logging
 import sys
@@ -47,7 +48,7 @@ def _purge(prefixes: tuple[str, ...]) -> None:
 def install_scikit_learn_placeholder_if_blocked() -> bool:
     """Register the placeholder if scikit-learn cannot be imported. Returns True if it was used."""
     try:
-        import sklearn.metrics  # noqa: F401
+        importlib.import_module("sklearn.metrics")
     except ImportError as exc:
         # A failed import can leave half-loaded modules behind; clear them before retrying.
         _purge(("sklearn", "sentence_transformers"))
@@ -70,7 +71,8 @@ def _silence_progress_bars() -> None:
     try:
         from transformers.utils import logging as transformers_logging
 
-        transformers_logging.disable_progress_bar()
+        # The transformers helper has no type annotations; the call is a plain no-argument function.
+        transformers_logging.disable_progress_bar()  # type: ignore[no-untyped-call]
     except ImportError:
         pass
 

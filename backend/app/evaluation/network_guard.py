@@ -110,11 +110,13 @@ class NetworkGuard:
             guard._check_host(host, None)
             return original_gethostbyname(host)
 
-        socket.socket.connect = connect  # type: ignore[method-assign]
-        socket.socket.connect_ex = connect_ex  # type: ignore[method-assign]
-        socket.socket.sendto = sendto  # type: ignore[method-assign]
-        socket.getaddrinfo = getaddrinfo  # type: ignore[assignment]
-        socket.gethostbyname = gethostbyname  # type: ignore[assignment]
+        # setattr: these are deliberate replacements of standard-library functions, whose exact
+        # signatures (overloads, buffer types) are not worth reproducing for the type checker.
+        setattr(socket.socket, "connect", connect)  # noqa: B010
+        setattr(socket.socket, "connect_ex", connect_ex)  # noqa: B010
+        setattr(socket.socket, "sendto", sendto)  # noqa: B010
+        setattr(socket, "getaddrinfo", getaddrinfo)  # noqa: B010
+        setattr(socket, "gethostbyname", gethostbyname)  # noqa: B010
         return self
 
     def __exit__(
@@ -123,11 +125,11 @@ class NetworkGuard:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        socket.socket.connect = self._originals["connect"]  # type: ignore[method-assign]
-        socket.socket.connect_ex = self._originals["connect_ex"]  # type: ignore[method-assign]
-        socket.socket.sendto = self._originals["sendto"]  # type: ignore[method-assign]
-        socket.getaddrinfo = self._originals["getaddrinfo"]
-        socket.gethostbyname = self._originals["gethostbyname"]
+        setattr(socket.socket, "connect", self._originals["connect"])  # noqa: B010
+        setattr(socket.socket, "connect_ex", self._originals["connect_ex"])  # noqa: B010
+        setattr(socket.socket, "sendto", self._originals["sendto"])  # noqa: B010
+        setattr(socket, "getaddrinfo", self._originals["getaddrinfo"])  # noqa: B010
+        setattr(socket, "gethostbyname", self._originals["gethostbyname"])  # noqa: B010
 
     # --- reporting ----------------------------------------------------------------------------
 

@@ -108,8 +108,8 @@ def _parse_question(raw: Any, corpus_files: set[str]) -> EvalQuestion:
             f"{where}: an unanswerable question cannot have expected sources or answers",
         )
     else:
-        _require(sources, f"{where}: needs at least one expected source")
-        _require(groups, f"{where}: needs answer_contains")
+        _require(bool(sources), f"{where}: needs at least one expected source")
+        _require(bool(groups), f"{where}: needs answer_contains")
 
     return EvalQuestion(
         id=qid,
@@ -146,5 +146,5 @@ def load_dataset(directory: Path = DEFAULT_EVAL_DIR) -> Dataset:
     questions = tuple(_parse_question(q, corpus_files) for q in raw["questions"])
     ids = [q.id for q in questions]
     _require(len(ids) == len(set(ids)), "question ids must be unique")
-    _require(questions, "there are no questions")
+    _require(bool(questions), "there are no questions")
     return Dataset(corpus_dir=corpus_dir, questions=questions)

@@ -1,6 +1,7 @@
 import os
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from app.ai.embeddings.base import (
     EmbeddingRuntimeError,
@@ -66,7 +67,7 @@ class SentenceTransformerProvider:
             convert_to_numpy=True,
             show_progress_bar=False,
         )
-        return vectors.tolist()
+        return cast(list[list[float]], vectors.tolist())
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]

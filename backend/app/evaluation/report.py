@@ -97,7 +97,7 @@ def _answers_section(run: EvalRun) -> list[str]:
     lines.append(
         f"  time per question: median {statistics.median(seconds):.1f}s, max {max(seconds):.1f}s"
     )
-    refusals = defaultdict(int)
+    refusals: defaultdict[str, int] = defaultdict(int)
     for outcome in run.answers:
         if outcome.answer is not None and not outcome.answer.grounded:
             refusals[outcome.answer.reason] += 1
