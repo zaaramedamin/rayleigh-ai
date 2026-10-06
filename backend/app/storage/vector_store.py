@@ -7,13 +7,14 @@ Points carry only ids and filterable metadata. The chunk text and its provenance
 SQLite, which remains the source of truth for citations.
 """
 
+import math
 import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Protocol, Self
+from typing import Protocol, Self, cast
 
 from qdrant_client import QdrantClient, models
 
@@ -58,7 +59,12 @@ class VectorStore(Protocol):
         top_k: int,
         document_ids: Sequence[int] | None = None,
         file_types: Sequence[str] | None = None,
+        exclude_document_ids: Sequence[int] | None = None,
     ) -> list[VectorHit]: ...
+
+    def similarities(
+        self, vector: Sequence[float], keys: Sequence[tuple[int, int]]
+    ) -> dict[tuple[int, int], float]: ...
 
     def count(self, document_id: int | None = None) -> int: ...
 
@@ -187,9 +193,17 @@ class QdrantVectorStore:
         top_k: int,
         document_ids: Sequence[int] | None = None,
         file_types: Sequence[str] | None = None,
+        exclude_document_ids: Sequence[int] | None = None,
     ) -> list[VectorHit]:
         """Most similar points first. Empty or None filters mean "no filter"."""
         conditions: list[models.Condition] = []
+        excluded: list[models.Condition] = []
+        if exclude_document_ids:
+            excluded.append(
+                models.FieldCondition(
+                    key="document_id", match=models.MatchAny(any=list(exclude_document_ids))
+                )
+            )
         if document_ids:
             conditions.append(
                 models.FieldCondition(
@@ -207,7 +221,11 @@ class QdrantVectorStore:
             self._collection,
             query=list(vector),
             limit=top_k,
-            query_filter=models.Filter(must=conditions) if conditions else None,
+            query_filter=(
+                models.Filter(must=conditions or None, must_not=excluded or None)
+                if conditions or excluded
+                else None
+            ),
             with_payload=True,
         )
         return [
@@ -220,6 +238,34 @@ class QdrantVectorStore:
             for point in response.points
             if point.payload is not None
         ]
+
+    def similarities(
+        self, vector: Sequence[float], keys: Sequence[tuple[int, int]]
+    ) -> dict[tuple[int, int], float]:
+        """Cosine similarity of `vector` to the stored vector of each (document_id, chunk_index).
+
+        A chunk with no stored vector is simply left out of the answer."""
+        if not keys:
+            return {}
+        points = self._client.retrieve(
+            self._collection,
+            ids=[point_id(document_id, chunk_index) for document_id, chunk_index in keys],
+            with_payload=True,
+            with_vectors=True,
+        )
+        found: dict[tuple[int, int], float] = {}
+        norm = math.sqrt(sum(x * x for x in vector))
+        for point in points:
+            if point.payload is None or not isinstance(point.vector, list):
+                continue
+            stored = cast(list[float], point.vector)  # one unnamed vector per point
+            stored_norm = math.sqrt(sum(x * x for x in stored))
+            if not norm or not stored_norm:
+                continue
+            dot = sum(a * b for a, b in zip(vector, stored, strict=True))
+            key = (int(point.payload["document_id"]), int(point.payload["chunk_index"]))
+            found[key] = dot / (norm * stored_norm)
+        return found
 
     def count(self, document_id: int | None = None) -> int:
         count_filter = self._document_filter(document_id) if document_id is not None else None

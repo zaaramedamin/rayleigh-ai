@@ -16,6 +16,11 @@ def _script_directory() -> ScriptDirectory:
     return ScriptDirectory.from_config(config)
 
 
+def latest_revision() -> str:
+    """The newest schema revision this program knows."""
+    return _script_directory().get_current_head() or ""
+
+
 def database_is_up_to_date(engine: Engine) -> bool:
     """True if the database has been migrated to the latest Alembic revision."""
     with engine.connect() as connection:

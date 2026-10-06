@@ -13,7 +13,7 @@ Safeguards, in order:
 import logging
 import re
 import secrets
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -21,7 +21,12 @@ from sqlalchemy.orm import Session
 
 from app.ai.embeddings.base import EmbeddingProvider
 from app.ai.llm.base import LLMProvider
-from app.knowledge.retrieval.service import RetrievedChunk, retrieve
+from app.knowledge.retrieval.service import (
+    RetrievedChunk,
+    SearchMode,
+    describe_location,
+    retrieve,
+)
 from app.storage.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -72,6 +77,8 @@ class Source:
     end_line: int
     score: float
     text: str
+    start_page: int | None = None
+    end_page: int | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +109,8 @@ def build_prompt(question: str, notes: Sequence[RetrievedChunk], nonce: str) -> 
     blocks = []
     for number, note in enumerate(notes, start=1):
         label = f"{note.source} > {note.heading_path}" if note.heading_path else note.source
+        if note.start_page is not None:
+            label += f", {describe_location(0, 0, note.start_page, note.end_page)}"
         text = note.text[:MAX_CONTEXT_CHARS]
         blocks.append(
             f"=== NOTE {number} BEGIN {nonce} ===\n"
@@ -149,6 +158,8 @@ def resolve_citations(text: str, notes: Sequence[RetrievedChunk]) -> tuple[str, 
             end_line=note.end_line,
             score=note.score,
             text=note.text,
+            start_page=note.start_page,
+            end_page=note.end_page,
         )
         for number, note in enumerate(notes, start=1)
         if number in cited
@@ -162,18 +173,28 @@ def _declined(reason: Reason, considered: int = 0) -> Answer:
     )
 
 
-def compose_answer(
-    llm: LLMProvider, question: str, retrieved: Sequence[RetrievedChunk], min_score: float
-) -> Answer:
-    """Turn retrieved notes into a grounded answer, or an explicit refusal."""
+@dataclass(frozen=True)
+class AnswerPlan:
+    """What the model is asked, and the notes its citation numbers will be mapped back to."""
+
+    notes: list[RetrievedChunk]
+    system: str
+    user: str
+
+
+def plan_answer(
+    question: str, retrieved: Sequence[RetrievedChunk], min_score: float
+) -> AnswerPlan | None:
+    """The prompt for a question, or None when no note is relevant enough to answer from."""
     notes = select_context(retrieved, min_score)
     if not notes:
-        logger.info("answer finished reason=no_relevant_notes")
-        return _declined("no_relevant_notes")
-
+        return None
     system, user = build_prompt(question, notes, nonce=secrets.token_hex(8))
-    reply = llm.generate(system, user)
+    return AnswerPlan(notes, system, user)
 
+
+def finish_answer(reply: str, notes: Sequence[RetrievedChunk]) -> Answer:
+    """Check what the model wrote: a refusal, or text whose citations all point at real notes."""
     if _DECLINED.match(reply):
         logger.info("answer finished reason=model_declined notes=%d", len(notes))
         return _declined("model_declined", len(notes))
@@ -189,6 +210,76 @@ def compose_answer(
     )
 
 
+def compose_answer(
+    llm: LLMProvider, question: str, retrieved: Sequence[RetrievedChunk], min_score: float
+) -> Answer:
+    """Turn retrieved notes into a grounded answer, or an explicit refusal."""
+    plan = plan_answer(question, retrieved, min_score)
+    if plan is None:
+        logger.info("answer finished reason=no_relevant_notes")
+        return _declined("no_relevant_notes")
+    return finish_answer(llm.generate(plan.system, plan.user), plan.notes)
+
+
+@dataclass(frozen=True)
+class Token:
+    """Text the model has written so far. Not checked yet: it may still turn out to be a refusal."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class Finished:
+    """The end of a streamed answer: the checked result, which replaces everything streamed."""
+
+    answer: Answer
+
+
+# How much of a streamed reply is held back to see whether it is the word INSUFFICIENT.
+_REFUSAL_WORD = "INSUFFICIENT"
+_MAX_HELD_CHARS = 40
+
+
+def stream_answer(
+    llm: LLMProvider, question: str, retrieved: Sequence[RetrievedChunk], min_score: float
+) -> Generator[Token | Finished, None, None]:
+    """`compose_answer`, but the model's text is passed on as it is written.
+
+    The streamed text is *unverified*: citation numbers are only checked once the reply is
+    complete, so the last event is always a `Finished` with the checked answer, and a client must
+    show that instead of what it streamed. The start of the reply is held back while it could
+    still become the refusal word, so the word itself is never streamed as if it were an answer.
+    Closing the iterator stops the model.
+    """
+    plan = plan_answer(question, retrieved, min_score)
+    if plan is None:
+        logger.info("answer finished reason=no_relevant_notes")
+        yield Finished(_declined("no_relevant_notes"))
+        return
+
+    parts: list[str] = []
+    held = ""  # the start of the reply, not passed on yet
+    undecided = True
+    refusing = False
+    for piece in llm.stream(plan.system, plan.user):
+        parts.append(piece)
+        if not undecided:
+            if not refusing:
+                yield Token(piece)
+            continue
+        held += piece
+        word = re.sub(r"^\W+", "", held).upper()
+        if (not word or _REFUSAL_WORD.startswith(word)) and len(held) < _MAX_HELD_CHARS:
+            continue  # still could be INSUFFICIENT
+        undecided = False
+        refusing = bool(_DECLINED.match(held))
+        if not refusing:
+            yield Token(held)
+    if undecided and held and not _DECLINED.match(held):
+        yield Token(held)  # a short reply that stopped before it was clear what it was
+    yield Finished(finish_answer("".join(parts), plan.notes))
+
+
 def answer_question(
     session: Session,
     embedder: EmbeddingProvider,
@@ -200,6 +291,7 @@ def answer_question(
     min_score: float,
     document_ids: Sequence[int] | None = None,
     file_types: Sequence[str] | None = None,
+    mode: SearchMode = "vector",
 ) -> Answer:
     """Retrieve relevant notes and answer from them. Raises ValueError for a bad question."""
     retrieved = retrieve(
@@ -210,5 +302,6 @@ def answer_question(
         top_k=top_k,
         document_ids=document_ids,
         file_types=file_types,
+        mode=mode,
     )
     return compose_answer(llm, question, retrieved, min_score)

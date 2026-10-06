@@ -24,8 +24,40 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "LLM_MODEL",
         "LLM_TIMEOUT_SECONDS",
         "LLM_THINK",
+        "SPEECH_MODEL",
+        "SPEECH_LANGUAGE",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_speech_defaults_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(_env_file=None)
+    assert (settings.speech_model, settings.speech_language) == ("openai/whisper-base", "")
+
+    monkeypatch.setenv("SPEECH_MODEL", "openai/whisper-small")
+    monkeypatch.setenv("SPEECH_LANGUAGE", " FR ")
+    settings = Settings(_env_file=None)
+    assert (settings.speech_model, settings.speech_language) == ("openai/whisper-small", "fr")
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("SPEECH_MODEL", "whisper-base"),
+        ("SPEECH_MODEL", "../../etc/passwd"),
+        ("SPEECH_MODEL", "https://example.com/model"),
+        ("SPEECH_LANGUAGE", "english please"),
+        ("SPEECH_LANGUAGE", "e"),
+        ("SPEECH_LANGUAGE", "en-GB"),
+    ],
+)
+def test_invalid_speech_settings_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
 
 
 def test_defaults() -> None:

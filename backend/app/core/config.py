@@ -1,7 +1,7 @@
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
@@ -14,6 +14,9 @@ MODEL_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0
 
 # An Ollama model tag, e.g. "qwen3.5:4b" or "llama3.2".
 LLM_MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./-]*(:[A-Za-z0-9_.-]+)?")
+
+# A spoken-language code as Whisper names them, e.g. "en", "fr", "ar".
+SPEECH_LANGUAGE_PATTERN = re.compile(r"[a-z]{2,3}")
 
 # Upper bound for the number of search results per query.
 MAX_TOP_K = 50
@@ -62,6 +65,9 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     # Number of chunks a search returns by default.
     retrieval_top_k: int = Field(default=5, ge=1, le=MAX_TOP_K)
+    # How notes are found: by meaning (vector), by the words in the question (keyword), or both
+    # merged (hybrid). Whatever the mode, the relevance gate still uses meaning similarity.
+    search_mode: Literal["vector", "keyword", "hybrid"] = "hybrid"
     # Minimum similarity for a note to be used to answer. Weaker matches are ignored, and if
     # none is left the assistant says it does not have enough information. Tune with the
     # evaluation set.
@@ -72,6 +78,38 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = Field(default=120, ge=5, le=900)
     # Let the model reason before answering: much slower, sometimes better.
     llm_think: bool = False
+    # Files that need a real parser (PDF) are read in a separate process with these limits.
+    parser_timeout_seconds: int = Field(default=120, ge=5, le=900)
+    pdf_max_pages: int = Field(default=2000, ge=1, le=20000)
+    # Lines that repeat at the top or bottom of most pages (running headers, page numbers) are
+    # dropped from PDFs, because they would match nearly every question. Keep them if they
+    # hold real content.
+    pdf_keep_headers_footers: bool = False
+    # Names besides 127.0.0.1, localhost and ::1 that the API answers to (comma separated).
+    # Any other Host header is refused, which is what stops DNS rebinding.
+    allowed_hosts: Annotated[list[str], NoDecode] = []
+    # Other web pages allowed to read the API's answers, e.g. http://127.0.0.1:5173. Empty means
+    # none: the interface is served from the same address and needs no cross-site access.
+    cors_origins: Annotated[list[str], NoDecode] = []
+    # The largest request the API reads, and how many it accepts per minute.
+    max_request_mb: int = Field(default=8, ge=1, le=256)
+    rate_limit_per_minute: int = Field(default=1200, ge=10, le=100000)
+    # Stored conversations that were not touched for this many days are deleted. 0 keeps them
+    # until you delete them.
+    conversation_retention_days: int = Field(default=0, ge=0, le=3650)
+    # Require the access password for every API route except /health and /auth.
+    access_required: bool = True
+    # Local speech recognition (Whisper) for voice orders. Downloaded once into MODELS_DIR.
+    speech_model: str = "openai/whisper-base"
+    # The language you speak to it, as a code such as "en" or "fr". Empty: detected each time.
+    speech_language: str = ""
+
+    @field_validator("allowed_hosts", "cors_origins", mode="before")
+    @classmethod
+    def _split_names(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
 
     @field_validator("allowed_folders", mode="before")
     @classmethod
@@ -86,6 +124,21 @@ class Settings(BaseSettings):
         if not MODEL_NAME_PATTERN.fullmatch(value):
             raise ValueError("EMBEDDING_MODEL must look like 'organisation/model-name'")
         return value
+
+    @field_validator("speech_model")
+    @classmethod
+    def _validate_speech_model(cls, value: str) -> str:
+        if not MODEL_NAME_PATTERN.fullmatch(value):
+            raise ValueError("SPEECH_MODEL must look like 'organisation/model-name'")
+        return value
+
+    @field_validator("speech_language")
+    @classmethod
+    def _validate_speech_language(cls, value: str) -> str:
+        code = value.strip().lower()
+        if code and not SPEECH_LANGUAGE_PATTERN.fullmatch(code):
+            raise ValueError("SPEECH_LANGUAGE must be a language code such as 'en', or empty")
+        return code
 
     @field_validator("ollama_url")
     @classmethod

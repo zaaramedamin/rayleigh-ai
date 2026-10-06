@@ -36,6 +36,13 @@ ENCRYPTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("documents", "original_filename", "documents.original_filename"),
     ("chunks", "text", "chunks.text"),
     ("chunks", "heading_path", "chunks.heading_path"),
+    ("assistant_memories", "text", "assistant_memories.text"),
+    ("assistant_settings", "value", "assistant_settings.value"),
+    ("document_sources", "source_root", "document_sources.source_root"),
+    ("document_sources", "source_path", "document_sources.source_path"),
+    ("conversations", "title", "conversations.title"),
+    ("messages", "content", "messages.content"),
+    ("messages", "payload", "messages.payload"),
 )
 
 Progress = Callable[[str], None]
@@ -162,7 +169,7 @@ def _check_has_tables(db_path: Path) -> None:
     connection = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     try:
         if not _table_exists(connection, "documents"):
-            raise SecurityError("the database has no tables yet; run `alembic upgrade head` first")
+            raise SecurityError("the database has no tables yet; run `python -m app migrate` first")
     finally:
         connection.close()
 

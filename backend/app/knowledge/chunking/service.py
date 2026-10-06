@@ -5,13 +5,11 @@ from sqlalchemy import delete, exists, select
 from sqlalchemy.orm import Session
 
 from app.knowledge.chunking.chunker import chunk_text
-from app.knowledge.ingestion.file_types import extract_text
+from app.knowledge.ingestion.file_types import extract_document, is_markdown
 from app.storage.files import read_file
 from app.storage.models import Chunk, Document
 
 logger = logging.getLogger(__name__)
-
-MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 
 
 def has_chunks(session: Session, document: Document) -> bool:
@@ -27,12 +25,13 @@ def chunk_document(
     Raises ParseError if the stored bytes can no longer be read as text.
     """
     suffix = Path(document.original_filename).suffix
-    text = extract_text(suffix, read_file(data_dir, document))
+    extracted = extract_document(suffix, read_file(data_dir, document))
     pieces = chunk_text(
-        text,
-        markdown=suffix.lower() in MARKDOWN_SUFFIXES,
+        extracted.text,
+        markdown=is_markdown(suffix),
         chunk_size=chunk_size,
         overlap=overlap,
+        page_starts=extracted.page_starts,
     )
 
     session.execute(delete(Chunk).where(Chunk.document_id == document.id))
@@ -44,6 +43,8 @@ def chunk_document(
             heading_path=piece.heading_path,
             start_line=piece.start_line,
             end_line=piece.end_line,
+            start_page=piece.start_page,
+            end_page=piece.end_page,
             char_count=len(piece.text),
         )
         for piece in pieces

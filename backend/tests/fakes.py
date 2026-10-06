@@ -1,9 +1,10 @@
 import hashlib
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
-from app.ai.llm.base import ChatMessage, ChatReply
+from app.ai.llm.base import ChatMessage, ChatReply, ToolCall, ToolSpec
+from app.ai.speech.base import Samples
 
 
 class HashingEmbedder:
@@ -54,22 +55,74 @@ class FakeLLM:
         self.calls: list[tuple[str, str]] = []
         self.chats: list[tuple[str, list[ChatMessage], float]] = []
         self.truncated = False
+        # Replies given to the next `generate` calls, one each, before `reply` is used again.
+        self.script: list[str] = []
+        # For `stream`: how many characters each piece holds, an error to raise once that many
+        # pieces were sent, and how many streams were closed before they ended.
+        self.piece_chars = 4
+        self.stream_error_after: tuple[int, Exception] | None = None
+        self.streams_closed_early = 0
+        # What the model asks the application to do, and the tools it was offered each time.
+        self.tool_calls: list[ToolCall] = []
+        self.tools_offered: list[list[ToolSpec]] = []
 
     def generate(self, system: str, user: str) -> str:
         self.calls.append((system, user))
         if self.error is not None:
             raise self.error
-        return self.reply
+        return self.script.pop(0) if self.script else self.reply
 
-    def chat(
-        self, system: str, messages: Sequence[ChatMessage], *, temperature: float = 0.0
-    ) -> ChatReply:
-        self.chats.append((system, list(messages), temperature))
+    def stream(self, system: str, user: str) -> Iterator[str]:
+        self.calls.append((system, user))
         if self.error is not None:
             raise self.error
-        return ChatReply(text=self.reply, truncated=self.truncated)
+        text = self.script.pop(0) if self.script else self.reply
+        sent = 0
+        finished = False
+        try:
+            for start in range(0, len(text), self.piece_chars):
+                if self.stream_error_after is not None and sent >= self.stream_error_after[0]:
+                    raise self.stream_error_after[1]
+                yield text[start : start + self.piece_chars]
+                sent += 1
+            finished = True
+        finally:
+            if not finished:
+                self.streams_closed_early += 1
+
+    def chat(
+        self,
+        system: str,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float = 0.0,
+        tools: Sequence[ToolSpec] = (),
+    ) -> ChatReply:
+        self.chats.append((system, list(messages), temperature))
+        self.tools_offered.append(list(tools))
+        if self.error is not None:
+            raise self.error
+        return ChatReply(
+            text=self.reply, truncated=self.truncated, tool_calls=tuple(self.tool_calls)
+        )
 
     def list_models(self) -> list[str]:
         if self.error is not None:
             raise self.error
         return self.installed
+
+
+class FakeRecognizer:
+    """Scripted stand-in for the speech model. Records what it was asked to transcribe."""
+
+    def __init__(self, text: str = "open the settings page", *, error: Exception | None = None):
+        self.text = text
+        self.error = error
+        self.model_name = "test/fake-speech"
+        self.heard: list[tuple[int, str | None]] = []  # (number of samples, language)
+
+    def transcribe(self, samples: Samples, language: str | None = None) -> str:
+        self.heard.append((int(samples.size), language))
+        if self.error is not None:
+            raise self.error
+        return self.text

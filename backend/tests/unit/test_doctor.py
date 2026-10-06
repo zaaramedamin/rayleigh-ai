@@ -78,6 +78,7 @@ def test_a_healthy_plaintext_library_only_warns_that_it_is_not_encrypted(
         "database": "ok",
         "encryption": "warn",
         "stored files": "ok",
+        "library": "ok",
         "chunks": "ok",
         "search index": "ok",
         "allowed folders": "ok",
@@ -94,7 +95,7 @@ def test_a_missing_database_is_a_failure_and_nothing_is_created(
     checks = by_name(run_doctor(make_settings()))
 
     assert checks["database"].status == "fail"
-    assert checks["database"].fix == "alembic upgrade head"
+    assert checks["database"].fix == "python -m app migrate"
     assert "stored files" not in checks  # dependent checks are skipped, not guessed
     assert not data_dir.exists()
 
@@ -485,3 +486,46 @@ def test_a_tampered_encrypted_stored_file_is_found(
 
     assert checks["stored files"].status == "fail"
     assert "do not match their checksum" in checks["stored files"].message
+
+
+# --- edited and deleted files -------------------------------------------------------------------
+
+
+def _set_status(library: Path, name: str, status: str) -> None:
+    from sqlalchemy import update
+
+    from app.storage.models import Document
+
+    engine = create_db_engine(library)
+    with Session(engine) as session:
+        session.execute(
+            update(Document).where(Document.original_filename == name).values(status=status)
+        )
+        session.commit()
+    engine.dispose()
+
+
+def test_a_document_whose_file_is_gone_is_a_warning_with_a_way_to_see_it(
+    healthy: Path, make_settings: MakeSettings, notes: Path
+) -> None:
+    _set_status(healthy, "b.txt", "missing")
+
+    checks = by_name(run_doctor(make_settings(allowed_folders=[notes]), quick=True))
+
+    assert checks["library"].status == "warn"
+    assert "1 document(s) were not found in your folders" in checks["library"].message
+    assert "prune --dry-run" in (checks["library"].fix or "")
+    # It still has vectors until the next index run removes them; the doctor says so.
+    assert checks["search index"].status == "warn"
+    assert "1 replaced or missing document(s) still have vectors" in checks["search index"].message
+
+
+def test_older_versions_are_reported_as_history_not_as_a_problem(
+    healthy: Path, make_settings: MakeSettings, notes: Path
+) -> None:
+    _set_status(healthy, "b.txt", "superseded")
+
+    checks = by_name(run_doctor(make_settings(allowed_folders=[notes]), quick=True))
+
+    assert checks["library"].status == "ok"
+    assert "1 current document(s), 1 older version(s) kept as history" in checks["library"].message

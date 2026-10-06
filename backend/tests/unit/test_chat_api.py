@@ -1,8 +1,10 @@
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
 from app.ai.llm.base import (
     ChatMessage,
@@ -10,11 +12,15 @@ from app.ai.llm.base import (
     LLMModelNotFoundError,
     LLMTimeoutError,
     LLMUnavailableError,
+    ToolCall,
 )
-from app.api.deps import get_embedder, get_llm, get_session
+from app.api.deps import get_embedder, get_llm, get_optional_session, get_vector_store
 from app.api.v1.chat import MAX_HISTORY_TURNS, MAX_TURN_CHARS
 from app.assistant.chat import MAX_MESSAGE_CHARS
+from app.assistant.identity import Identity, save_identity
+from app.assistant.memory import add_memory, list_memories
 from app.core.config import Settings, get_settings
+from app.knowledge.profile.service import save_profile
 from app.main import app
 from tests.fakes import FakeLLM
 
@@ -41,6 +47,7 @@ def test_the_model_replies_without_any_notes(client: TestClient, llm: FakeLLM) -
         "answer": "Paris is the capital of France.",
         "model": "test/fake-llm",
         "truncated": False,
+        "actions": [],
     }
     assert llm.chats[0][1] == [ChatMessage("user", "What is the capital of France?")]
     assert llm.calls == []
@@ -61,14 +68,117 @@ def test_earlier_turns_reach_the_model_in_order(client: TestClient, llm: FakeLLM
     ]
 
 
-def test_the_library_is_never_opened(client: TestClient, llm: FakeLLM) -> None:
+def test_the_notes_are_never_searched(client: TestClient, llm: FakeLLM) -> None:
     def unavailable() -> None:
-        raise AssertionError("general chat must not touch the library")
+        raise AssertionError("general chat must not search the notes")
 
-    app.dependency_overrides[get_session] = unavailable
     app.dependency_overrides[get_embedder] = unavailable
+    app.dependency_overrides[get_vector_store] = unavailable
 
     assert client.post("/api/v1/chat", json={"message": "Hello"}).status_code == 200
+
+
+def test_chat_works_when_the_library_cannot_be_opened(client: TestClient, llm: FakeLLM) -> None:
+    # The temporary data folder has no migrated database, as with a locked or brand-new library.
+    response = client.post("/api/v1/chat", json={"message": "Hello"})
+
+    assert response.status_code == 200
+    system = llm.chats[0][0]
+    assert system.startswith("You are Reyleight")  # the default identity
+    assert "PROFILE" not in system and "MEMORY" not in system
+    # Nothing can be saved, so remembering is not offered; the other actions still are.
+    offered = {tool.name for tool in llm.tools_offered[0]}
+    assert "remember" not in offered and "open_page" in offered
+
+
+# --- the assistant: identity, profile, memory and actions -------------------------------------
+
+
+@pytest.fixture
+def library(session: Session, llm: FakeLLM) -> Session:
+    """A library the chat can open: the assistant's settings and memories live in it."""
+    app.dependency_overrides[get_optional_session] = lambda: session
+    return session
+
+
+def test_the_model_is_told_its_identity_the_profile_and_its_memories(
+    client: TestClient, llm: FakeLLM, library: Session, data_dir: Path
+) -> None:
+    save_identity(library, Identity(name="Jarvis", address="sir", role="Keep my lab running."))
+    save_profile(library, data_dir, {"name": "Sam", "location": "Lyon"}, 1000, 100)
+    add_memory(library, "Has a sister called Mia", "owner")
+
+    client.post("/api/v1/chat", json={"message": "Hello"})
+
+    system = llm.chats[0][0]
+    assert system.startswith("You are Jarvis")
+    assert "Keep my lab running." in system
+    assert "My name: Sam" in system and "Where I live: Lyon" in system
+    assert "- Has a sister called Mia" in system
+
+
+def test_the_profile_and_memories_stay_out_when_the_owner_switches_them_off(
+    client: TestClient, llm: FakeLLM, library: Session, data_dir: Path
+) -> None:
+    save_identity(library, Identity(use_profile=False, use_memory=False))
+    save_profile(library, data_dir, {"name": "Sam"}, 1000, 100)
+    add_memory(library, "Has a sister called Mia", "owner")
+    llm.tool_calls = [ToolCall("remember", {"fact": "likes tea"})]
+
+    client.post("/api/v1/chat", json={"message": "remember I like tea"})
+
+    system = llm.chats[0][0]
+    assert "Sam" not in system and "Mia" not in system
+    assert "remember" not in {tool.name for tool in llm.tools_offered[0]}
+    assert [m.text for m in list_memories(library)] == ["Has a sister called Mia"]
+
+
+def test_an_order_comes_back_as_a_validated_action(
+    client: TestClient, llm: FakeLLM, library: Session
+) -> None:
+    llm.reply = ""
+    llm.tool_calls = [
+        ToolCall("open_page", {"page": "settings"}),
+        ToolCall("format_disk", {"drive": "C"}),
+    ]
+
+    body = client.post("/api/v1/chat", json={"message": "open the settings"}).json()
+
+    assert body["actions"] == [{"name": "open_page", "args": {"page": "settings"}}]
+    assert body["answer"] == "Opening the settings page, sir."
+
+
+def test_a_fact_the_model_asks_to_keep_is_saved_as_a_memory(
+    client: TestClient, llm: FakeLLM, library: Session
+) -> None:
+    llm.reply = ""
+    llm.tool_calls = [ToolCall("remember", {"fact": "Prefers answers in French"})]
+
+    body = client.post("/api/v1/chat", json={"message": "remember: answer in French"}).json()
+
+    assert body["answer"] == "I will remember that, sir."
+    assert body["actions"] == [{"name": "remember", "args": {"fact": "Prefers answers in French"}}]
+    assert [(m.text, m.origin) for m in list_memories(library)] == [
+        ("Prefers answers in French", "assistant")
+    ]
+
+    # The next conversation knows it.
+    llm.tool_calls = []
+    client.post("/api/v1/chat", json={"message": "Hello"})
+    assert "- Prefers answers in French" in llm.chats[1][0]
+
+
+def test_a_profile_note_that_cannot_be_read_does_not_break_the_chat(
+    client: TestClient, llm: FakeLLM, library: Session, data_dir: Path
+) -> None:
+    new, _old = save_profile(library, data_dir, {"name": "Sam"}, 1000, 100)
+    assert new is not None
+    (data_dir / new.stored_path).unlink()  # the stored copy went missing
+
+    response = client.post("/api/v1/chat", json={"message": "Hello"})
+
+    assert response.status_code == 200
+    assert "Sam" not in llm.chats[0][0]
 
 
 def test_a_cut_off_reply_is_flagged(client: TestClient, llm: FakeLLM) -> None:

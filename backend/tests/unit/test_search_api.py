@@ -59,6 +59,9 @@ def test_search_returns_ranked_results_with_sources(client: TestClient, indexed:
         "start_line",
         "end_line",
         "text",
+        "start_page",  # empty for notes; filled for formats with pages
+        "end_page",
+        "keyword_score",  # only when the chunk was found by its words
     }
 
 
@@ -107,7 +110,7 @@ def test_unmigrated_database_gives_a_clear_503(
     response = client.post("/api/v1/search", json={"query": "oats"})
 
     assert response.status_code == 503
-    assert "alembic upgrade head" in response.json()["detail"]
+    assert "python -m app migrate" in response.json()["detail"]
 
 
 def test_busy_vector_store_gives_a_clear_503(
@@ -132,3 +135,60 @@ def test_busy_vector_store_gives_a_clear_503(
 
 def test_search_is_listed_in_the_api_docs(client: TestClient) -> None:
     assert "/api/v1/search" in client.get("/openapi.json").json()["paths"]
+
+
+# --- search modes -------------------------------------------------------------------------------
+
+
+def test_search_by_words_reports_how_well_the_words_match(
+    client: TestClient, indexed: None
+) -> None:
+    response = client.post("/api/v1/search", json={"query": "platform four", "mode": "keyword"})
+
+    assert response.status_code == 200
+    first = response.json()["results"][0]
+    assert first["source"] == "travel.md"
+    assert first["keyword_score"] > 0
+    assert 0 <= first["score"] <= 1  # the similarity is still there, and is what the gate uses
+
+
+def test_search_by_meaning_has_no_keyword_score(client: TestClient, indexed: None) -> None:
+    response = client.post("/api/v1/search", json={"query": "simmer oats", "mode": "vector"})
+
+    assert all(r["keyword_score"] is None for r in response.json()["results"])
+
+
+def test_the_default_mode_comes_from_the_settings(
+    client: TestClient,
+    indexed: None,
+    make_settings: Callable[..., Settings],
+) -> None:
+    app.dependency_overrides[get_settings] = lambda: make_settings(
+        retrieval_top_k=2, search_mode="keyword"
+    )
+
+    results = client.post("/api/v1/search", json={"query": "platform"}).json()["results"]
+
+    assert results and all(r["keyword_score"] is not None for r in results)
+
+
+def test_an_unknown_mode_is_rejected(client: TestClient, indexed: None) -> None:
+    response = client.post("/api/v1/search", json={"query": "oats", "mode": "fuzzy"})
+
+    assert response.status_code == 422
+
+
+def test_search_by_words_without_fts5_is_a_clear_503(
+    client: TestClient, indexed: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.knowledge.retrieval.keyword import KeywordSearchUnavailable
+
+    def unavailable(*_a: object, **_k: object) -> None:
+        raise KeywordSearchUnavailable("this SQLite was built without FTS5")
+
+    monkeypatch.setattr("app.knowledge.retrieval.service.keyword_search", unavailable)
+
+    response = client.post("/api/v1/search", json={"query": "platform", "mode": "keyword"})
+
+    assert response.status_code == 503
+    assert "FTS5" in response.json()["detail"]

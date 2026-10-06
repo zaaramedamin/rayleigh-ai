@@ -3,17 +3,19 @@
 import argparse
 import getpass
 import io
+import ipaddress
 import json
 import os
 import socket
 import sys
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from app.ai.embeddings.base import (
@@ -24,13 +26,14 @@ from app.ai.embeddings.base import (
     model_dir_for,
 )
 from app.ai.llm.base import LLMError, LLMUnavailableError
+from app.ai.speech.base import is_speech_model_downloaded
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.evaluation.dataset import DatasetError, load_dataset
 from app.evaluation.network_guard import NetworkBlocked, NetworkGuard
 from app.evaluation.report import format_report, to_dict
 from app.evaluation.runner import hit_rate, run_evaluation
-from app.knowledge.answering.service import Answer, compose_answer
+from app.knowledge.answering.service import Answer, Source, compose_answer
 from app.knowledge.chunking.service import rechunk_all
 from app.knowledge.components import (
     create_llm,
@@ -39,23 +42,41 @@ from app.knowledge.components import (
     vector_store_path,
 )
 from app.knowledge.indexing.service import (
+    IndexProgress,
     IndexSummary,
     count_pending,
+    count_stale_vectors,
     index_pending,
+    library_counts,
     reset_index,
 )
 from app.knowledge.ingestion.file_types import FILE_TYPES
 from app.knowledge.ingestion.service import IngestSummary, ingest_folders
-from app.knowledge.retrieval.service import RetrievedChunk, retrieve
+from app.knowledge.library.documents import clear_legacy_sources
+from app.knowledge.library.folders import allowed_folders
+from app.knowledge.library.prune import find_candidates, prune
+from app.knowledge.library.state import load_state
+from app.knowledge.retrieval.keyword import KeywordSearchUnavailable
+from app.knowledge.retrieval.service import (
+    SEARCH_MODES,
+    RetrievedChunk,
+    describe_location,
+    retrieve,
+)
 from app.operations.backup import BackupError, create_backup, restore_backup
 from app.operations.doctor import format_checks, run_doctor
+from app.operations.upgrade import UpgradeError, UpgradeResult, upgrade_database
 from app.security import keystore
 from app.security.errors import KeystoreError, SecurityError, WrongPassphraseError
 from app.security.migrate import encrypt_library
-from app.storage.database import create_db_engine
+from app.storage.database import create_db_engine, vacuum_database
 from app.storage.migrations import database_is_up_to_date
-from app.storage.models import Chunk, Document
-from app.storage.vector_store import VectorStoreError, collection_name, count_local_vectors
+from app.storage.vector_store import (
+    QdrantVectorStore,
+    VectorStoreError,
+    collection_name,
+    count_local_vectors,
+)
 
 
 class CliError(Exception):
@@ -108,9 +129,7 @@ def _open_engine(settings: Settings) -> Engine:
             file=sys.stderr,
         )
     if not database_is_up_to_date(engine):
-        raise CliError(
-            "database missing or out of date. Run `alembic upgrade head` from backend/ first."
-        )
+        raise CliError("database missing or out of date. Run `python -m app migrate` first.")
     return engine
 
 
@@ -121,34 +140,114 @@ def _load_embedder(settings: Settings) -> EmbeddingProvider:
         raise CliError(str(exc)) from exc
 
 
+def _duration(seconds: float) -> str:
+    if seconds < 90:
+        return f"{seconds:.0f} s"
+    if seconds < 90 * 60:
+        return f"{seconds / 60:.0f} min"
+    hours, rest = divmod(int(seconds / 60), 60)
+    return f"{hours} h {rest} min"
+
+
+def _progress_printer() -> tuple[Callable[[IndexProgress], None], Callable[[], None]]:
+    """A progress line on stderr: it rewrites itself on a terminal and prints rarely elsewhere.
+
+    Returns (show, finish). Only counts and times are shown, never note text or names.
+    """
+    tty = sys.stderr.isatty()
+    interval = 0.5 if tty else 15.0
+    last_shown = [0.0]
+    shown_any = [False]
+
+    def show(progress: IndexProgress) -> None:
+        if progress.chunks_total == 0:
+            return
+        now = time.monotonic()
+        finished = progress.chunks_done >= progress.chunks_total
+        if not finished and now - last_shown[0] < interval:
+            return
+        last_shown[0] = now
+        line = (
+            f"indexing: {progress.chunks_done:,} of {progress.chunks_total:,} chunks "
+            f"({progress.chunks_done * 100 // progress.chunks_total}%)"
+        )
+        if progress.chunks_per_second:
+            line += f", {progress.chunks_per_second:.0f} chunks/s"
+        left = progress.seconds_left
+        if left is not None and not finished:
+            line += f", about {_duration(left)} left"
+        if tty:
+            print("\r" + line.ljust(79), end="", file=sys.stderr, flush=True)
+        else:
+            print(line, file=sys.stderr, flush=True)
+        shown_any[0] = True
+
+    def finish() -> None:
+        if tty and shown_any[0]:
+            print(file=sys.stderr)
+
+    return show, finish
+
+
 def _run_index(session: Session, settings: Settings, *, rebuild: bool) -> IndexSummary:
     embedder = _load_embedder(settings)
+    show, finish = _progress_printer()
     try:
-        with open_vector_store(settings, embedder) as store:
+        with _open_store(settings, embedder) as store:
             if rebuild:
                 reset_index(session, store)
-            return index_pending(session, embedder, store)
+            return index_pending(session, embedder, store, on_progress=show)
     except VectorStoreError as exc:
         raise CliError(str(exc)) from exc
+    finally:
+        finish()
 
 
 def _index_after_changes(session: Session, settings: Settings) -> None:
     """Make new or re-chunked documents searchable, when the model is available."""
     pending = count_pending(session, settings.embedding_model)
-    if pending == 0:
+    stale = count_stale_vectors(session)
+    if pending == 0 and stale == 0:
         print("search index:              up to date")
         return
     if not is_model_downloaded(settings.models_dir, settings.embedding_model):
-        print(
-            f"search index:              {pending} document(s) not searchable yet; run "
-            "`python -m app download-model`, then `python -m app index`"
-        )
+        if pending:
+            print(
+                f"search index:              {pending} document(s) not searchable yet; run "
+                "`python -m app download-model`, then `python -m app index`"
+            )
+        else:
+            print("search index:              up to date")
         return
     summary = _run_index(session, settings, rebuild=False)
     print(
         f"search index:              {summary.documents_indexed} document(s) indexed, "
         f"{summary.chunks_embedded} chunks embedded"
     )
+    if summary.documents_purged:
+        print(
+            f"search index:              {summary.documents_purged} replaced or missing "
+            "document(s) removed from the index"
+        )
+
+
+# What each failure reason code means, for the person reading the summary.
+FAILURE_HELP = {
+    "no_text": "no text to read (probably a scan, a picture of text, which would need OCR)",
+    "encrypted": "protected by a password",
+    "corrupt": "damaged, or not really this type of file",
+    "unsafe_archive": "an archive that looks like an attack (huge when unpacked, or bad paths)",
+    "old_format": "an old binary Office file (.doc, .xls, .ppt) or a password-protected one",
+    "too_many_pages": "more pages than PDF_MAX_PAGES allows",
+    "timeout": "took longer than PARSER_TIMEOUT_SECONDS to read, so it was stopped",
+    "crashed": "the reader stopped unexpectedly on this file",
+    "too_large_output": "holds far more text than a reader may return",
+    "not_utf8": "text that is not UTF-8",
+    "binary": "a binary file, not text",
+    "invalid_json": "not valid JSON",
+    "unreadable": "could not be read (is it open in another program?)",
+    "chunking": "its text could not be split into pieces",
+}
 
 
 def _print_ingest_summary(summary: IngestSummary) -> None:
@@ -167,9 +266,88 @@ def _print_ingest_summary(summary: IngestSummary) -> None:
     print(f"allowed folders missing:   {summary.folders_missing}")
     failures = ", ".join(f"{reason}={count}" for reason, count in sorted(summary.failed.items()))
     print(f"failed:                    {sum(summary.failed.values())} {failures}".rstrip())
+    for reason in sorted(summary.failed):
+        if reason in FAILURE_HELP:
+            print(f"  {reason + ':':<24} {FAILURE_HELP[reason]}")
+    sync = summary.sync
+    if sync.superseded:
+        print(f"replaced by an edit:       {sync.superseded} (older versions are kept as history)")
+    if sync.reactivated:
+        print(f"back again:                {sync.reactivated}")
+    if sync.newly_missing:
+        print(
+            f"files not found again:     {sync.newly_missing} document(s) now marked missing "
+            "(`python -m app prune` removes them)"
+        )
+    if sync.paused_folders:
+        print(
+            f"folders not judged:        {sync.paused_folders} (many files vanished at once; "
+            "is the folder available?)"
+        )
 
 
 # --- commands ---------------------------------------------------------------------------------
+
+
+def _print_upgrade(result: UpgradeResult) -> None:
+    if not result.upgraded:
+        print("the database is up to date.")
+        return
+    before = (
+        "a new database" if result.from_revision is None else f"revision {result.from_revision}"
+    )
+    print(f"database upgraded: {before} -> {result.to_revision}")
+    if result.backup is not None:
+        print(f"a copy from before the upgrade is saved at: {result.backup}")
+
+
+def _cmd_migrate(_args: argparse.Namespace, settings: Settings) -> int:
+    """Bring the database up to the version this program needs (after saving a copy of it)."""
+    try:
+        _print_upgrade(upgrade_database(settings))
+    except UpgradeError as exc:
+        raise CliError(str(exc)) from exc
+    return 0
+
+
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower() in LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
+    """Start the API (and the interface behind it) on this computer, after making sure the database
+    is up to date. It refuses to listen on a network address: that would let other computers read
+    your notes."""
+    if not _is_loopback(args.host):
+        if not args.unsafe_expose_to_network:
+            raise CliError(
+                f"refusing to listen on {args.host}: that would let other computers on the network "
+                "reach your notes. Use 127.0.0.1 (the default). If you really mean it, add "
+                "--unsafe-expose-to-network, and read docs/security.md first."
+            )
+        print(
+            f"WARNING: listening on {args.host}. Anyone who can reach this computer can reach the "
+            "sign-in page. The access password is the only protection.",
+            file=sys.stderr,
+        )
+    if not args.no_migrate:
+        try:
+            _print_upgrade(upgrade_database(settings))
+        except UpgradeError as exc:
+            raise CliError(str(exc)) from exc
+    import uvicorn
+
+    print(f"Reyleight is starting at http://{args.host}:{args.port}/ (Ctrl+C to stop)")
+    uvicorn.run("app.main:app", host=args.host, port=args.port, log_config=None)
+    return 0
 
 
 def _cmd_types(_args: argparse.Namespace, _settings: Settings) -> int:
@@ -181,21 +359,94 @@ def _cmd_types(_args: argparse.Namespace, _settings: Settings) -> int:
 
 
 def _cmd_ingest(_args: argparse.Namespace, settings: Settings) -> int:
-    if not settings.allowed_folders:
+    folders = [entry.path for entry in allowed_folders(settings)]
+    if not folders:
         print("ALLOWED_FOLDERS is empty. Nothing to ingest. Set it in .env.")
         return 0
     engine = _open_engine(settings)
     with Session(engine) as session:
+        state = load_state(settings.data_dir)
         summary = ingest_folders(
             session,
             settings.data_dir,
-            settings.allowed_folders,
+            folders,
             settings.max_file_size_mb * 1024 * 1024,
             chunk_size=settings.chunk_size_chars,
             chunk_overlap=settings.chunk_overlap_chars,
+            excluded_hashes=frozenset(state.excluded),
+            legacy_sources=state.sources,
         )
+        clear_legacy_sources(settings.data_dir)  # now recorded, encrypted, in the database
         _print_ingest_summary(summary)
         _index_after_changes(session, settings)
+    return 0
+
+
+PRUNE_LIST_LIMIT = 40
+
+# How long a command waits for the search index when the server has it open.
+STORE_WAIT_SECONDS = 20.0
+
+
+def _open_store(
+    settings: Settings, embedder: EmbeddingProvider
+) -> AbstractContextManager[QdrantVectorStore]:
+    """The search index, waiting a little if the server is using it right now."""
+    return open_vector_store(
+        settings,
+        embedder,
+        wait_seconds=STORE_WAIT_SECONDS,
+        on_wait=lambda: print(
+            "the search index is in use (by the server?); waiting for it ...",
+            file=sys.stderr,
+            flush=True,
+        ),
+    )
+
+
+def _cmd_prune(args: argparse.Namespace, settings: Settings) -> int:
+    """Remove documents whose files are gone. Shows them first and asks before deleting."""
+    engine = _open_engine(settings)
+    with Session(engine) as session:
+        found = find_candidates(session, include_superseded=args.superseded)
+        if found.total == 0:
+            print("nothing to remove: no document is marked missing.")
+            if not args.superseded:
+                print("(--superseded also removes older versions of files that were edited.)")
+            return 0
+        listing = [("missing", d) for d in found.missing] + [
+            ("replaced", d) for d in found.superseded
+        ]
+        for label, document in listing[:PRUNE_LIST_LIMIT]:
+            print(f"  {label:<9} {document.original_filename}  (id {document.id})")
+        if len(listing) > PRUNE_LIST_LIMIT:
+            print(f"  ... and {len(listing) - PRUNE_LIST_LIMIT} more")
+        print(f"{len(found.missing)} missing, {len(found.superseded)} replaced version(s).")
+        print("Their stored copies, text and search entries would be removed.")
+        print("Your original files in your folders are never touched.")
+        if args.dry_run:
+            print("dry run: nothing was removed.")
+            return 0
+        if not args.yes:
+            if not sys.stdin.isatty():
+                print("not removing anything: run again with --yes to confirm.", file=sys.stderr)
+                return 1
+            if input("Remove them? Type yes to confirm: ").strip().lower() != "yes":
+                print("nothing was removed.")
+                return 0
+        try:
+            if is_model_downloaded(settings.models_dir, settings.embedding_model):
+                with _open_store(settings, _load_embedder(settings)) as store:
+                    removed = prune(session, settings.data_dir, found, store)
+            else:
+                removed = prune(session, settings.data_dir, found, None)
+        except VectorStoreError as exc:
+            raise CliError(str(exc)) from exc
+    vacuum_database(engine)  # so the removed text does not stay inside the database file
+    print(
+        f"removed {removed.documents} document(s), {removed.chunks} chunks and "
+        f"{removed.stored_files} stored file(s); the database file was compacted."
+    )
     return 0
 
 
@@ -224,9 +475,7 @@ def _cmd_index(args: argparse.Namespace, settings: Settings) -> int:
 def _cmd_status(_args: argparse.Namespace, settings: Settings) -> int:
     engine = _open_engine(settings)
     with Session(engine) as session:
-        documents = session.scalar(select(func.count()).select_from(Document)) or 0
-        chunks = session.scalar(select(func.count()).select_from(Chunk)) or 0
-        pending = count_pending(session, settings.embedding_model)
+        counts = library_counts(session, settings.embedding_model)
     downloaded = is_model_downloaded(settings.models_dir, settings.embedding_model)
     try:
         vectors: int | str = count_local_vectors(
@@ -237,9 +486,13 @@ def _cmd_status(_args: argparse.Namespace, settings: Settings) -> int:
 
     print(f"embedding model: {settings.embedding_model}")
     print(f"  downloaded:    {'yes' if downloaded else 'no (run `python -m app download-model`)'}")
-    print(f"documents:       {documents}")
-    print(f"chunks:          {chunks}")
-    print(f"searchable:      {documents - pending} of {documents} documents")
+    print(f"documents:       {counts.active}")
+    print(f"chunks:          {counts.chunks}")
+    print(f"searchable:      {counts.searchable} of {counts.active} documents")
+    if counts.missing:
+        print(f"missing:         {counts.missing} (file not found; `python -m app prune`)")
+    if counts.superseded:
+        print(f"older versions:  {counts.superseded} (kept as history)")
     print(f"vectors:         {vectors}")
     print(f"llm model:       {settings.llm_model}")
     print(f"  ollama:        {_llm_state(settings)}")
@@ -273,11 +526,17 @@ def _cmd_check_llm(_args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _where(item: RetrievedChunk | Source) -> str:
+    """Pages for a file that has them, lines otherwise."""
+    return describe_location(item.start_line, item.end_line, item.start_page, item.end_page)
+
+
 def _print_result(rank: int, result: RetrievedChunk) -> None:
     heading = f"  [{result.heading_path}]" if result.heading_path else ""
     print(
         f"{rank}. score {result.score:.3f}  {result.source}{heading}  "
-        f"lines {result.start_line}-{result.end_line}  (id {result.citation_id})"
+        f"{_where(result)}  (id {result.citation_id})"
+        + (f"  keyword {result.keyword_score:.1f}" if result.keyword_score is not None else "")
     )
     snippet = " ".join(result.text.split())
     print(f"   {snippet[:240]}{'...' if len(snippet) > 240 else ''}")
@@ -289,7 +548,7 @@ def _cmd_search(args: argparse.Namespace, settings: Settings) -> int:
     embedder = _load_embedder(settings)
     with Session(engine) as session:
         try:
-            with open_vector_store(settings, embedder) as store:
+            with _open_store(settings, embedder) as store:
                 results = retrieve(
                     session,
                     embedder,
@@ -298,8 +557,9 @@ def _cmd_search(args: argparse.Namespace, settings: Settings) -> int:
                     top_k=settings.retrieval_top_k if args.top_k is None else args.top_k,
                     document_ids=args.document,
                     file_types=args.type,
+                    mode=args.mode or settings.search_mode,
                 )
-        except (ValueError, VectorStoreError) as exc:
+        except (ValueError, VectorStoreError, KeywordSearchUnavailable) as exc:
             raise CliError(str(exc)) from exc
         pending = count_pending(session, settings.embedding_model)
 
@@ -322,7 +582,7 @@ def _print_answer(answer: Answer) -> None:
         heading = f" > {source.heading_path}" if source.heading_path else ""
         print(
             f"  [{source.marker}] {source.source}{heading}, "
-            f"lines {source.start_line}-{source.end_line}  (id {source.citation_id})"
+            f"{_where(source)}  (id {source.citation_id})"
         )
 
 
@@ -332,7 +592,7 @@ def _cmd_ask(args: argparse.Namespace, settings: Settings) -> int:
     embedder = _load_embedder(settings)
     with Session(engine) as session:
         try:
-            with open_vector_store(settings, embedder) as store:
+            with _open_store(settings, embedder) as store:
                 retrieved = retrieve(
                     session,
                     embedder,
@@ -341,12 +601,13 @@ def _cmd_ask(args: argparse.Namespace, settings: Settings) -> int:
                     top_k=settings.retrieval_top_k if args.top_k is None else args.top_k,
                     document_ids=args.document,
                     file_types=args.type,
+                    mode=args.mode or settings.search_mode,
                 )
             print("thinking ...", file=sys.stderr, flush=True)
             answer = compose_answer(
                 create_llm(settings), question, retrieved, settings.answer_min_score
             )
-        except (ValueError, VectorStoreError, LLMError) as exc:
+        except (ValueError, VectorStoreError, LLMError, KeywordSearchUnavailable) as exc:
             raise CliError(str(exc)) from exc
         pending = count_pending(session, settings.embedding_model)
 
@@ -402,8 +663,9 @@ def _cmd_eval(args: argparse.Namespace, settings: Settings) -> int:
             min_score=min_score,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            mode=args.mode or settings.search_mode,
         )
-    except (ValueError, VectorStoreError) as exc:
+    except (ValueError, VectorStoreError, KeywordSearchUnavailable) as exc:
         raise CliError(str(exc)) from exc
 
     print(format_report(run))
@@ -536,7 +798,7 @@ def _cmd_restore(args: argparse.Namespace, _settings: Settings) -> int:
         print("passphrase (unless this Windows account can unlock it).")
     print(f"To use it, set DATA_DIR={summary.target} (in .env or the environment)")
     if summary.needs_migration:
-        print("then run `alembic upgrade head`: this backup is from an older version.")
+        print("then run `python -m app migrate`: this backup is from an older version.")
     return 0
 
 
@@ -713,6 +975,23 @@ def _cmd_download_model(_args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _cmd_download_voice_model(_args: argparse.Namespace, settings: Settings) -> int:
+    target = model_dir_for(settings.models_dir, settings.speech_model)
+    if is_speech_model_downloaded(settings.models_dir, settings.speech_model):
+        print(f"speech model already downloaded: {target}")
+        return 0
+
+    from app.ai.speech.download import download_speech_model
+
+    print(f"downloading {settings.speech_model} (one time, needs internet) ...")
+    try:
+        download_speech_model(settings.speech_model, settings.models_dir)
+    except Exception as exc:  # network, disk or unknown-model errors: report, don't crash
+        raise CliError(f"download failed: {type(exc).__name__}: {exc}") from exc
+    print(f"saved to {target}")
+    return 0
+
+
 # --- entry point ------------------------------------------------------------------------------
 
 
@@ -730,7 +1009,34 @@ def _build_parser() -> argparse.ArgumentParser:
         sub.set_defaults(handler=handler)
         return sub
 
-    add("ingest", _cmd_ingest, "ingest, chunk and index files from ALLOWED_FOLDERS")
+    serve = add("serve", _cmd_serve, "start the interface and the API (on this computer only)")
+    serve.add_argument(
+        "--host", default="127.0.0.1", help="address to listen on (default: 127.0.0.1)"
+    )
+    serve.add_argument("--port", type=int, default=8000, help="port to listen on (default: 8000)")
+    serve.add_argument(
+        "--no-migrate", action="store_true", help="do not upgrade the database before starting"
+    )
+    serve.add_argument(
+        "--unsafe-expose-to-network",
+        action="store_true",
+        help="allow a non-local --host (lets other computers reach your notes; not recommended)",
+    )
+    add("migrate", _cmd_migrate, "upgrade the database to this version (saves a copy first)")
+    add("ingest", _cmd_ingest, "ingest, chunk and index files from your allowed folders")
+    add("sync", _cmd_ingest, "same as ingest: also notices edited and deleted files")
+    prune_command = add(
+        "prune", _cmd_prune, "remove documents whose files are gone (asks before deleting)"
+    )
+    prune_command.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    prune_command.add_argument(
+        "--dry-run", action="store_true", help="only list what would be removed"
+    )
+    prune_command.add_argument(
+        "--superseded",
+        action="store_true",
+        help="also remove older versions of files that were edited",
+    )
     add("rechunk", _cmd_rechunk, "rebuild all chunks (after changing chunk settings)")
     index = add("index", _cmd_index, "embed documents that are not searchable yet")
     index.add_argument(
@@ -746,6 +1052,11 @@ def _build_parser() -> argparse.ArgumentParser:
     search.add_argument(
         "--document", action="append", type=int, metavar="ID", help="only this document id"
     )
+    search.add_argument(
+        "--mode",
+        choices=SEARCH_MODES,
+        help="find notes by meaning, by the words in the question, or both (default: SEARCH_MODE)",
+    )
     ask = add("ask", _cmd_ask, "answer a question from your notes, with citations")
     ask.add_argument("question", nargs="+", help="your question (quotes are optional)")
     ask.add_argument("--top-k", type=int, help="notes to consider (default: RETRIEVAL_TOP_K)")
@@ -755,6 +1066,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ask.add_argument(
         "--document", action="append", type=int, metavar="ID", help="only this document id"
     )
+    ask.add_argument(
+        "--mode",
+        choices=SEARCH_MODES,
+        help="find notes by meaning, by the words in the question, or both (default: SEARCH_MODE)",
+    )
     add("check-llm", _cmd_check_llm, "send a test prompt to the local LLM (Ollama)")
     evaluate = add("eval", _cmd_eval, "measure retrieval and answer quality on a built-in test set")
     evaluate.add_argument("--answers", action="store_true", help="also test answers (uses the LLM)")
@@ -762,6 +1078,11 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--chunk-size", type=int, help="try another chunk size (characters)")
     evaluate.add_argument("--chunk-overlap", type=int, help="try another chunk overlap")
     evaluate.add_argument("--min-score", type=float, help="try another ANSWER_MIN_SCORE")
+    evaluate.add_argument(
+        "--mode",
+        choices=SEARCH_MODES,
+        help="search mode for the gate and answers (default: SEARCH_MODE); every mode is compared",
+    )
     evaluate.add_argument("--output", metavar="FILE", help="also write full results as JSON")
     evaluate.add_argument(
         "--set",
@@ -796,6 +1117,11 @@ def _build_parser() -> argparse.ArgumentParser:
     restore.add_argument("--to", metavar="FOLDER", required=True, help="an empty folder")
     add("types", _cmd_types, "list supported file types")
     add("download-model", _cmd_download_model, "download the embedding model (needs internet)")
+    add(
+        "download-voice-model",
+        _cmd_download_voice_model,
+        "download the speech model for voice orders (needs internet)",
+    )
     return parser
 
 
@@ -824,6 +1150,13 @@ def main(argv: list[str] | None = None, settings: Settings | None = None) -> int
         except SecurityError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+        except KeyboardInterrupt:
+            # Indexing saves its progress after every batch, so nothing is lost.
+            print(
+                "\ninterrupted. Progress is saved: run the command again to continue.",
+                file=sys.stderr,
+            )
+            return 130
 
     if not args.offline:
         return run()

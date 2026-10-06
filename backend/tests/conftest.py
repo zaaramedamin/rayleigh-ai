@@ -23,6 +23,36 @@ def _restore_logging() -> Iterator[None]:
     root.setLevel(level)
 
 
+@pytest.fixture(autouse=True)
+def _open_access() -> Iterator[None]:
+    """API tests call routes directly; the sign-in itself is tested in test_access_api.py."""
+    from app.api.access import require_access
+    from app.main import app
+
+    app.dependency_overrides[require_access] = lambda: None
+    yield
+    app.dependency_overrides.pop(require_access, None)
+
+
+def _make_test_clients_local() -> None:
+    """The API only answers to this computer's own address, so the tests' client says it is one.
+
+    Done when this file is imported, because some test modules create their client at import time.
+    """
+    from starlette.testclient import TestClient
+
+    original = TestClient.__init__
+
+    def local_init(self: TestClient, app: object, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("base_url", "http://127.0.0.1")
+        original(self, app, *args, **kwargs)  # type: ignore[arg-type]
+
+    TestClient.__init__ = local_init  # type: ignore[method-assign]
+
+
+_make_test_clients_local()
+
+
 @pytest.fixture
 def data_dir(tmp_path: Path) -> Path:
     return tmp_path / "data"

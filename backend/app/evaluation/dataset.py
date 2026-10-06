@@ -20,6 +20,7 @@ class DatasetError(ValueError):
 class ExpectedSource:
     file: str
     heading: str | None = None  # part of the heading path that must match, e.g. "Cooking"
+    page: int | None = None  # for PDFs: a page the chunk must include
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,10 @@ class EvalQuestion:
     answer_must_not_contain: tuple[str, ...] = ()
     smoke: bool = False
     note: str = ""
+    # A label for reporting results by kind of question, e.g. "exact-match" or "pdf".
+    group: str = ""
+    # For a follow-up: what was said before, oldest first, as (role, text).
+    history: tuple[tuple[str, str], ...] = ()
 
     @property
     def has_answer(self) -> bool:
@@ -43,6 +48,9 @@ class EvalQuestion:
 class Dataset:
     corpus_dir: Path
     questions: tuple[EvalQuestion, ...]
+    # Questions that only make sense after an earlier exchange. They need the model, because
+    # the follow-up is rewritten before the notes are searched, so only `--answers` runs them.
+    follow_ups: tuple[EvalQuestion, ...] = ()
 
     def of_type(self, *types: str) -> list[EvalQuestion]:
         return [q for q in self.questions if q.type in types]
@@ -61,7 +69,29 @@ def _string_list(value: Any, where: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _parse_question(raw: Any, corpus_files: set[str]) -> EvalQuestion:
+MAX_HISTORY_TURNS = 8
+
+
+def _parse_history(raw: Any, where: str) -> tuple[tuple[str, str], ...]:
+    _require(
+        isinstance(raw, list) and 0 < len(raw) <= MAX_HISTORY_TURNS,
+        f"{where}: history must be a list of 1 to {MAX_HISTORY_TURNS} turns",
+    )
+    turns = []
+    for turn in raw:
+        _require(
+            isinstance(turn, dict)
+            and turn.get("role") in ("user", "assistant")
+            and isinstance(turn.get("content"), str)
+            and turn["content"].strip() != "",
+            f"{where}: each history turn needs a role (user or assistant) and some text",
+        )
+        turns.append((turn["role"], turn["content"].strip()))
+    _require(turns[0][0] == "user", f"{where}: the history must start with the user")
+    return tuple(turns)
+
+
+def _parse_question(raw: Any, corpus_files: set[str], *, follow_up: bool = False) -> EvalQuestion:
     _require(isinstance(raw, dict), "each question must be an object")
     qid = raw.get("id")
     _require(isinstance(qid, str) and qid.strip() != "", "every question needs an id")
@@ -71,6 +101,12 @@ def _parse_question(raw: Any, corpus_files: set[str]) -> EvalQuestion:
     _require(qtype in _TYPES, f"{where}: type must be one of {_TYPES}")
     text = raw.get("question")
     _require(isinstance(text, str) and text.strip() != "", f"{where}: question text is empty")
+
+    history: tuple[tuple[str, str], ...] = ()
+    if follow_up:
+        history = _parse_history(raw.get("history"), where)
+    else:
+        _require("history" not in raw, f"{where}: history belongs in the follow_ups list")
 
     sources_raw = raw.get("expected_sources", [])
     _require(isinstance(sources_raw, list), f"{where}: expected_sources must be a list")
@@ -85,11 +121,16 @@ def _parse_question(raw: Any, corpus_files: set[str]) -> EvalQuestion:
             heading is None or (isinstance(heading, str) and heading != ""),
             f"{where}: heading must be a non-empty string",
         )
+        page = item.get("page")
+        _require(
+            page is None or (isinstance(page, int) and not isinstance(page, bool) and page >= 1),
+            f"{where}: page must be a positive whole number",
+        )
         _require(
             item["file"] in corpus_files,
             f"{where}: expected file {item['file']!r} is not in the corpus",
         )
-        sources.append(ExpectedSource(file=item["file"], heading=heading))
+        sources.append(ExpectedSource(file=item["file"], heading=heading, page=page))
 
     groups_raw = raw.get("answer_contains", [])
     _require(isinstance(groups_raw, list), f"{where}: answer_contains must be a list of lists")
@@ -120,6 +161,8 @@ def _parse_question(raw: Any, corpus_files: set[str]) -> EvalQuestion:
         answer_must_not_contain=forbidden,
         smoke=bool(raw.get("smoke", False)),
         note=str(raw.get("note", "")),
+        group=str(raw.get("group", "")),
+        history=history,
     )
 
 
@@ -144,7 +187,10 @@ def load_dataset(directory: Path = DEFAULT_EVAL_DIR) -> Dataset:
     corpus_files = set(names)
 
     questions = tuple(_parse_question(q, corpus_files) for q in raw["questions"])
-    ids = [q.id for q in questions]
+    follow_ups_raw = raw.get("follow_ups", [])
+    _require(isinstance(follow_ups_raw, list), "'follow_ups' must be a list")
+    follow_ups = tuple(_parse_question(q, corpus_files, follow_up=True) for q in follow_ups_raw)
+    ids = [q.id for q in (*questions, *follow_ups)]
     _require(len(ids) == len(set(ids)), "question ids must be unique")
     _require(bool(questions), "there are no questions")
-    return Dataset(corpus_dir=corpus_dir, questions=questions)
+    return Dataset(corpus_dir=corpus_dir, questions=questions, follow_ups=follow_ups)

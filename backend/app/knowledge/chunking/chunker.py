@@ -15,6 +15,8 @@ Rules:
 """
 
 import re
+from bisect import bisect_right
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 DEFAULT_CHUNK_SIZE = 1000
@@ -32,6 +34,9 @@ class ChunkData:
     heading_path: str
     start_line: int  # 1-based, inclusive
     end_line: int  # 1-based, inclusive
+    # 1-based pages the chunk comes from, for formats with pages; None otherwise.
+    start_page: int | None = None
+    end_page: int | None = None
 
 
 @dataclass
@@ -55,13 +60,18 @@ def chunk_text(
     markdown: bool,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overlap: int = DEFAULT_CHUNK_OVERLAP,
+    page_starts: Sequence[int] | None = None,
 ) -> list[ChunkData]:
+    """Split `text` into chunks. `page_starts` (character offsets where each page begins)
+    adds the pages each chunk comes from.
+    """
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
     if not 0 <= overlap < chunk_size:
         raise ValueError("overlap must be >= 0 and smaller than chunk_size")
 
     lines = _NEWLINE.split(text)
+    line_pages = _page_spans_of_lines(text, page_starts) if page_starts else None
     sections = _split_sections(lines) if markdown else [_Section("", 1, lines)]
 
     chunks: list[ChunkData] = []
@@ -79,9 +89,31 @@ def chunk_text(
                     heading_path=section.heading_path,
                     start_line=start_line,
                     end_line=end_line,
+                    start_page=line_pages[start_line - 1][0] if line_pages else None,
+                    end_page=line_pages[end_line - 1][1] if line_pages else None,
                 )
             )
     return chunks
+
+
+def _page_spans_of_lines(text: str, page_starts: Sequence[int]) -> list[tuple[int, int]]:
+    """For each line of `text`, the first and last 1-based page it touches.
+
+    A line normally sits on one page. A page that begins in the middle of a line makes that line
+    touch two, and a chunk containing it then says so.
+    """
+    starts = [0]
+    ends: list[int] = []
+    for newline in _NEWLINE.finditer(text):
+        ends.append(newline.start())
+        starts.append(newline.end())
+    ends.append(len(text))
+    spans = []
+    for start, end in zip(starts, ends, strict=True):
+        first = max(1, bisect_right(page_starts, start))
+        last = max(first, bisect_right(page_starts, max(start, end - 1)))
+        spans.append((first, last))
+    return spans
 
 
 # --- sections ---------------------------------------------------------------------------------

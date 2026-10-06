@@ -94,7 +94,7 @@ def _read_counts(db_path: Path) -> tuple[int, int, str]:
     finally:
         connection.close()
     if row is None:
-        raise BackupError("the database has no schema version (run `alembic upgrade head`)")
+        raise BackupError("the database has no schema version (run `python -m app migrate`)")
     return int(documents), int(chunks), str(row[0])
 
 
@@ -287,6 +287,7 @@ def restore_backup(archive_path: Path, target_dir: Path) -> RestoreSummary:
             if check != "ok":
                 raise BackupError(f"the database inside the backup is damaged: {check}")
             connection.execute("UPDATE documents SET indexed_model = NULL")
+            connection.execute("UPDATE chunks SET indexed_model = NULL")
             connection.commit()
         except sqlite3.OperationalError:
             connection.rollback()  # an older schema without the column: nothing to reset

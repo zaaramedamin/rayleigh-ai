@@ -1,10 +1,23 @@
 import json
 import re
+from dataclasses import dataclass
 from html.parser import HTMLParser
 
 
 class ParseError(ValueError):
     """Raised when a file's bytes cannot be treated as text. The message is a short reason code."""
+
+
+@dataclass(frozen=True)
+class Extracted:
+    """The text of a file, and where its pages begin when it has pages.
+
+    `page_starts` holds, for each page in order, the character offset in `text` where that page
+    begins (so the first is 0). It is None for formats without pages, such as plain text.
+    """
+
+    text: str
+    page_starts: tuple[int, ...] | None = None
 
 
 def parse_text(data: bytes) -> str:

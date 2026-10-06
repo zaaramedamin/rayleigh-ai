@@ -21,6 +21,7 @@ from app.ai.embeddings.base import is_model_downloaded
 from app.ai.llm.base import LLMError, LLMUnavailableError
 from app.core.config import Settings
 from app.knowledge.components import create_llm, vector_store_path
+from app.knowledge.indexing.service import count_stale_vectors, library_counts
 from app.security import keystore
 from app.security.errors import (
     DecryptionError,
@@ -204,7 +205,7 @@ def _open_library(settings: Settings, passphrase: str | None) -> tuple[Engine | 
     db_path = settings.data_dir / DB_FILENAME
     if not db_path.is_file():
         return None, [
-            Check("database", "fail", f"no database at {db_path}", "alembic upgrade head")
+            Check("database", "fail", f"no database at {db_path}", "python -m app migrate")
         ]
     try:
         engine = create_db_engine(settings.data_dir, passphrase=passphrase)
@@ -234,7 +235,7 @@ def _open_library(settings: Settings, passphrase: str | None) -> tuple[Engine | 
     if not database_is_up_to_date(engine):
         engine.dispose()
         return None, [
-            Check("database", "fail", "the database is out of date", "alembic upgrade head")
+            Check("database", "fail", "the database is out of date", "python -m app migrate")
         ]
     return engine, [Check("database", "ok", "present and at the latest version")]
 
@@ -380,21 +381,15 @@ def _check_chunks_and_index(session: Session, settings: Settings, *, repair: boo
         checks.append(Check("chunks", "ok", "every document has chunks"))
 
     model = settings.embedding_model
-    documents = session.scalar(select(func.count()).select_from(Document)) or 0
-    pending = (
-        session.scalar(
-            select(func.count())
-            .select_from(Document)
-            .where((Document.indexed_model.is_(None)) | (Document.indexed_model != model))
-        )
-        or 0
-    )
+    counts = library_counts(session, model)
+    documents, pending = counts.active, counts.pending
+    stale = count_stale_vectors(session)
     expected = (
         session.scalar(
             select(func.count())
             .select_from(Chunk)
             .join(Document, Chunk.document_id == Document.id)
-            .where(Document.indexed_model == model)
+            .where(Chunk.indexed_model == model)
         )
         or 0
     )
@@ -411,6 +406,7 @@ def _check_chunks_and_index(session: Session, settings: Settings, *, repair: boo
         )
         if repair:
             session.execute(update(Document).values(indexed_model=None))
+            session.execute(update(Chunk).values(indexed_model=None))
             session.commit()
             checks.append(
                 Check(
@@ -438,9 +434,38 @@ def _check_chunks_and_index(session: Session, settings: Settings, *, repair: boo
                 "python -m app index",
             )
         )
+    elif stale:
+        checks.append(
+            Check(
+                "search index",
+                "warn",
+                f"{stale} replaced or missing document(s) still have vectors in the index; "
+                "they are never returned",
+                "python -m app index",
+            )
+        )
     else:
         checks.append(Check("search index", "ok", f"{vectors} vectors for {documents} document(s)"))
     return checks
+
+
+def _check_library(session: Session) -> list[Check]:
+    """What the library knows about edited and deleted files."""
+    counts = library_counts(session, "")
+    if counts.missing:
+        return [
+            Check(
+                "library",
+                "warn",
+                f"{counts.missing} document(s) were not found in your folders in the last two "
+                "updates, so they are no longer searched",
+                "python -m app prune --dry-run shows them; they come back if the file returns",
+            )
+        ]
+    versions = (
+        f", {counts.superseded} older version(s) kept as history" if counts.superseded else ""
+    )
+    return [Check("library", "ok", f"{counts.active} current document(s){versions}")]
 
 
 # --- running everything -----------------------------------------------------------------------
@@ -474,6 +499,7 @@ def run_doctor(
                 results += _guarded(
                     "stored files", lambda: _check_files(session, settings, quick=quick)
                 )
+                results += _guarded("library", lambda: _check_library(session))
                 results += _guarded(
                     "search index",
                     lambda: _check_chunks_and_index(session, settings, repair=repair),

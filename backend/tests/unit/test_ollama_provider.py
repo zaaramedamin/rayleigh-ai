@@ -17,6 +17,8 @@ from app.ai.llm.base import (
     LLMModelNotFoundError,
     LLMTimeoutError,
     LLMUnavailableError,
+    ToolCall,
+    ToolSpec,
 )
 from app.ai.llm.ollama import OllamaProvider
 
@@ -171,6 +173,111 @@ def test_models_without_a_reasoning_mode_are_retried_without_the_think_field(
     assert _provider(ollama).generate("s", "u") == "fine"
     assert len(ollama.requests) == 2
     assert "think" not in ollama.requests[1][2]
+
+
+SETTINGS_TOOL = ToolSpec(
+    "open_page",
+    "Show one page.",
+    {"type": "object", "properties": {"page": {"type": "string"}}, "required": ["page"]},
+)
+
+
+def _tool_reply(*calls: Any, content: str = "") -> dict[str, Any]:
+    message = {"role": "assistant", "content": content, "tool_calls": list(calls)}
+    return {"message": message, "done": True}
+
+
+def test_tools_are_offered_to_the_model_and_its_requests_come_back(ollama: FakeOllama) -> None:
+    call = {"function": {"name": "open_page", "arguments": {"page": "settings"}}}
+    ollama.respond = lambda _p, _b: (200, _tool_reply(call))
+
+    reply = _provider(ollama).chat(
+        "s", [ChatMessage("user", "open settings")], tools=[SETTINGS_TOOL]
+    )
+
+    # A reply made only of tool requests has no words, and that is not an error.
+    assert reply == ChatReply("", tool_calls=(ToolCall("open_page", {"page": "settings"}),))
+    body = ollama.requests[0][2]
+    assert body is not None
+    assert body["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "open_page",
+                "description": "Show one page.",
+                "parameters": SETTINGS_TOOL.parameters,
+            },
+        }
+    ]
+
+
+def test_no_tools_field_is_sent_when_none_are_offered(ollama: FakeOllama) -> None:
+    call = {"function": {"name": "open_page", "arguments": {"page": "settings"}}}
+    ollama.respond = lambda _p, _b: (200, _tool_reply(call, content="Hello."))
+
+    reply = _provider(ollama).chat("s", [ChatMessage("user", "hi")])
+
+    body = ollama.requests[0][2]
+    assert body is not None and "tools" not in body
+    assert reply.tool_calls == ()  # requests nobody asked for are ignored
+
+
+def test_malformed_tool_requests_are_left_out(ollama: FakeOllama) -> None:
+    ollama.respond = lambda _p, _b: (
+        200,
+        _tool_reply(
+            "not an object",
+            {"function": "open_page"},
+            {"function": {"arguments": {"page": "chat"}}},
+            {"function": {"name": "lock_app", "arguments": "not json"}},
+            {"function": {"name": "open_page", "arguments": '{"page": "chat"}'}},
+            content="Done.",
+        ),
+    )
+
+    reply = _provider(ollama).chat("s", [ChatMessage("user", "x")], tools=[SETTINGS_TOOL])
+
+    assert reply.text == "Done."
+    assert reply.tool_calls == (ToolCall("lock_app", {}), ToolCall("open_page", {"page": "chat"}))
+
+
+def test_models_that_cannot_use_tools_are_asked_again_without_them(ollama: FakeOllama) -> None:
+    def respond(_path: str, body: dict[str, Any] | None) -> Reply:
+        if body is not None and "tools" in body:
+            return 400, {"error": "registry/library/test-model:1b does not support tools"}
+        return 200, _chat("I can only talk.")
+
+    ollama.respond = respond
+
+    reply = _provider(ollama).chat("s", [ChatMessage("user", "x")], tools=[SETTINGS_TOOL])
+
+    assert reply == ChatReply("I can only talk.")
+    assert len(ollama.requests) == 2
+    assert ollama.requests[1][2] is not None and "tools" not in ollama.requests[1][2]
+
+
+def test_a_model_with_neither_reasoning_nor_tools_still_answers(ollama: FakeOllama) -> None:
+    def respond(_path: str, body: dict[str, Any] | None) -> Reply:
+        if body is not None and "think" in body:
+            return 400, {"error": "model does not support thinking"}
+        if body is not None and "tools" in body:
+            return 400, {"error": "model does not support tools"}
+        return 200, _chat("fine")
+
+    ollama.respond = respond
+
+    assert (
+        _provider(ollama).chat("s", [ChatMessage("user", "x")], tools=[SETTINGS_TOOL]).text
+        == "fine"
+    )
+    assert len(ollama.requests) == 3
+
+
+def test_an_empty_reply_without_tool_requests_is_still_an_error(ollama: FakeOllama) -> None:
+    ollama.respond = lambda _p, _b: (200, _tool_reply())
+
+    with pytest.raises(LLMError, match="empty answer"):
+        _provider(ollama).chat("s", [ChatMessage("user", "x")], tools=[SETTINGS_TOOL])
 
 
 def test_other_rejections_are_reported_and_not_retried(ollama: FakeOllama) -> None:

@@ -634,7 +634,7 @@ def test_a_database_without_tables_is_refused_with_a_hint_and_nothing_is_changed
     data_dir.mkdir()
     sqlite3.connect(data_dir / DB_FILENAME).close()  # a database file with no tables yet
 
-    with pytest.raises(SecurityError, match="alembic upgrade head"):
+    with pytest.raises(SecurityError, match="python -m app migrate"):
         encrypt(data_dir, backup=None)
 
     assert not (data_dir / "security.json").exists()
@@ -652,3 +652,88 @@ def test_a_failing_safety_backup_stops_before_anything_is_changed(
     assert (plain_library / DB_FILENAME).read_bytes() == before
     assert not (plain_library / "security.json").exists()
     assert files_containing(plain_library, NEEDLES), "the library must be untouched"
+
+
+# --- where documents were found -----------------------------------------------------------------
+
+
+def test_places_are_encrypted_and_still_matched_after_encryption(
+    plain_library: Path, tmp_path: Path
+) -> None:
+    from app.knowledge.ingestion.service import ingest_folders
+    from app.storage.models import DocumentSource
+
+    folder = tmp_path / "my-private-folder"
+    folder.mkdir()
+    (folder / "secret-diary.txt").write_text("Entries about nothing in particular.")
+    engine = create_db_engine(plain_library)
+    with Session(engine) as session:
+        first = ingest_folders(session, plain_library, [folder], 100_000)
+    engine.dispose()
+    assert first.sync.locations_added == 1
+    assert files_containing(plain_library, [b"my-private-folder", b"secret-diary"]), (
+        "needs plaintext"
+    )
+
+    encrypt(plain_library, backup=None)
+
+    assert files_containing(plain_library, [b"my-private-folder", b"secret-diary"]) == []
+    engine = create_db_engine(plain_library)
+    with Session(engine) as session:
+        # Places cannot be searched for in SQL, so the sync compares them after reading: it must
+        # recognise the file it already knows instead of adding it again.
+        again = ingest_folders(session, plain_library, [folder], 100_000)
+        place = session.scalars(select(DocumentSource)).one()
+        assert again.sync.locations_added == 0
+        assert again.unchanged == 1 and again.added == 0
+        assert place.source_path == "secret-diary.txt"
+        assert place.source_root.endswith("my-private-folder")
+    engine.dispose()
+
+
+def test_the_profile_is_found_in_an_encrypted_library(plain_library: Path, tmp_path: Path) -> None:
+    from app.knowledge.profile.service import find_profile, save_profile
+
+    engine = create_db_engine(plain_library)
+    with Session(engine) as session:
+        first, _old = save_profile(session, plain_library, {"name": "Quillon"}, 1000, 100)
+        assert first is not None and find_profile(session) is not None
+    engine.dispose()
+
+    encrypt(plain_library, backup=None)
+
+    engine = create_db_engine(plain_library)
+    with Session(engine) as session:
+        found = find_profile(session)
+        assert found is not None and found.original_filename == "My profile.md"
+        # Saving again must replace the old note, not add a second one next to it.
+        second, replaced = save_profile(session, plain_library, {"name": "Marmalade"}, 1000, 100)
+        assert second is not None and replaced is not None and replaced.id == found.id
+    engine.dispose()
+
+
+# --- keyword search ------------------------------------------------------------------------------
+
+
+def test_keyword_search_works_on_an_encrypted_library_and_writes_nothing_readable(
+    plain_library: Path, tmp_path: Path
+) -> None:
+    from app.knowledge.retrieval.keyword import forget_indexes, keyword_search
+
+    encrypt(plain_library, backup=None)
+    forget_indexes()
+    before = sorted(p.name for p in plain_library.rglob("*") if p.is_file())
+
+    engine = create_db_engine(plain_library)
+    with Session(engine) as session:
+        by_code = keyword_search(session, "ZEBRA-GARAGE-4821", top_k=3)
+        by_heading = keyword_search(session, "Phoenix", top_k=3)
+        names = {d.id: d.original_filename for d in session.scalars(select(Document))}
+    engine.dispose()
+    forget_indexes()
+
+    assert [names[hit.document_id] for hit in by_code] == [SECRET_NAME]
+    assert {names[hit.document_id] for hit in by_heading} == {SECRET_NAME}
+    # Nothing was added to the data folder, and no word of the notes is readable in it.
+    assert sorted(p.name for p in plain_library.rglob("*") if p.is_file()) == before
+    assert files_containing(plain_library, NEEDLES) == []

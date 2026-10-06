@@ -12,6 +12,7 @@ from app.knowledge.chunking.service import chunk_document
 from app.operations.backup import BackupError, create_backup, restore_backup
 from app.storage.database import DB_FILENAME, create_db_engine
 from app.storage.files import save_file
+from app.storage.migrations import latest_revision
 from app.storage.models import Chunk, Document
 
 NOTES = {
@@ -77,7 +78,7 @@ def test_backup_contains_the_database_the_files_and_a_manifest(
     assert summary.documents == 2
     assert summary.chunks >= 2
     assert summary.files == 2
-    assert summary.schema_revision == "0003"
+    assert summary.schema_revision == latest_revision()
     assert summary.warnings == []
     with zipfile.ZipFile(destination) as z:
         names = set(z.namelist())

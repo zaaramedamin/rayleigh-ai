@@ -42,6 +42,31 @@ def _retrieval_section(run: EvalRun) -> list[str]:
     return lines
 
 
+def _modes_section(run: EvalRun) -> list[str]:
+    """The same questions run through each way of searching."""
+    if len(run.by_mode) < 2:
+        return []
+    lines = ["SEARCH MODES  (the same questions, found by meaning, by words, or both)"]
+    for name, outcomes in run.by_mode.items():
+        mark = "   <- used for the gate and answers" if name == run.mode else ""
+        lines.append(
+            f"  {name:<8} hit@1 {_pct(hit_rate(outcomes, 1))}   hit@3 {_pct(hit_rate(outcomes, 3))}"
+            f"   MRR {mean_reciprocal_rank(outcomes):.3f}{mark}"
+        )
+    groups = sorted(
+        {o.question.group for o in run.retrieval if o.question.group and o.question.has_answer}
+    )
+    for group in groups:
+        cells = []
+        total = 0
+        for name, outcomes in run.by_mode.items():
+            members = [o for o in outcomes if o.question.group == group and o.question.has_answer]
+            total = len(members)
+            cells.append(f"{name} {_pct(hit_rate(members, 1))}")
+        lines.append(f"  {group} ({total} questions), hit@1:  " + "   ".join(cells))
+    return lines
+
+
 def _gate_section(run: EvalRun) -> list[str]:
     gate = analyse_gate(run.retrieval)
     lines = ["RELEVANCE GATE  (best note score: answerable vs unanswerable questions)"]
@@ -113,15 +138,45 @@ def _answers_section(run: EvalRun) -> list[str]:
     return lines
 
 
+def _follow_ups_section(run: EvalRun) -> list[str]:
+    if not run.follow_ups:
+        return []
+    passed = sum(o.passed for o in run.follow_ups)
+    lines = [
+        f"FOLLOW-UP QUESTIONS  (rewritten from the earlier exchange before searching, "
+        f"{len(run.follow_ups)} questions)",
+        f"  {passed}/{len(run.follow_ups)} answered correctly "
+        f"({_pct(passed / len(run.follow_ups)).strip()})",
+    ]
+    for outcome in run.follow_ups:
+        if not outcome.passed:
+            lines.append(f"  FAIL  {outcome.question.id}: " + "; ".join(outcome.problems))
+            lines.append(
+                f"        typed {outcome.question.question!r}, "
+                f"searched for {outcome.searched_for!r}"
+            )
+            if outcome.answer is not None:
+                lines.append(f"        said: {' '.join(outcome.answer.text.split())[:160]!r}")
+    return lines
+
+
 def format_report(run: EvalRun) -> str:
     header = [
         "EVALUATION",
         f"  corpus: {run.documents} documents, {run.chunks} chunks"
         + (f", {run.ingest_failures} failed to ingest" if run.ingest_failures else ""),
         f"  embedding model: {run.embedding_model}",
-        f"  chunk size {run.chunk_size}, overlap {run.chunk_overlap}, top_k {run.top_k}",
+        f"  chunk size {run.chunk_size}, overlap {run.chunk_overlap}, top_k {run.top_k}, "
+        f"search mode {run.mode}",
     ]
-    sections = [header, _retrieval_section(run), _gate_section(run), _answers_section(run)]
+    sections = [
+        header,
+        _retrieval_section(run),
+        _modes_section(run),
+        _gate_section(run),
+        _answers_section(run),
+        _follow_ups_section(run),
+    ]
     return "\n\n".join("\n".join(section) for section in sections if section)
 
 
@@ -135,6 +190,18 @@ def to_dict(run: EvalRun) -> dict[str, Any]:
             "chunk_overlap": run.chunk_overlap,
             "top_k": run.top_k,
             "answer_min_score": run.min_score,
+            "search_mode": run.mode,
+        },
+        "modes": {
+            name: {
+                "hit_rate": {f"hit@{c}": hit_rate(outcomes, c) for c in RETRIEVAL_CUTOFFS},
+                "mrr": mean_reciprocal_rank(outcomes),
+                "groups": {
+                    group: hit_rate([o for o in outcomes if o.question.group == group], 1)
+                    for group in sorted({o.question.group for o in outcomes if o.question.group})
+                },
+            }
+            for name, outcomes in run.by_mode.items()
         },
         "corpus": {
             "documents": run.documents,
@@ -175,5 +242,16 @@ def to_dict(run: EvalRun) -> dict[str, Any]:
                 "seconds": round(a.seconds, 2),
             }
             for a in run.answers
+        ],
+        "follow_ups": [
+            {
+                "id": f.question.id,
+                "passed": f.passed,
+                "problems": f.problems,
+                "first_hit_rank": f.first_hit_rank,
+                "reason": f.answer.reason if f.answer else None,
+                "seconds": round(f.seconds, 2),
+            }
+            for f in run.follow_ups
         ],
     }

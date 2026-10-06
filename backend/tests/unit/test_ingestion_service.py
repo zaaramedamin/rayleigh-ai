@@ -28,7 +28,7 @@ def test_ingests_supported_files_and_creates_documents(
 ) -> None:
     (allowed / "a.txt").write_text("alpha")
     (allowed / "b.md").write_text("# Beta")
-    (allowed / "c.pdf").write_bytes(b"%PDF")
+    (allowed / "c.png").write_bytes(b"\x89PNG")
 
     summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
 
@@ -176,12 +176,12 @@ def test_files_with_no_extractable_text_are_skipped_as_empty(
 def test_summary_reports_unsupported_types_by_extension(
     session: Session, data_dir: Path, allowed: Path
 ) -> None:
-    (allowed / "a.pdf").write_bytes(b"%PDF")
-    (allowed / "b.docx").write_bytes(b"PK")
+    (allowed / "a.png").write_bytes(b"\x89PNG")
+    (allowed / "b.doc").write_bytes(b"\xd0\xcf")
 
     summary = ingest_folders(session, data_dir, [allowed], MAX_BYTES)
 
-    assert summary.unsupported_by_extension == {".pdf": 1, ".docx": 1}
+    assert summary.unsupported_by_extension == {".png": 1, ".doc": 1}
 
 
 def test_ingestion_creates_chunks_for_new_documents(

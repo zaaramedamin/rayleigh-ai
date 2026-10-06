@@ -11,6 +11,8 @@ dependencies = [
     "alembic",
     "sentence-transformers",
     "qdrant-client",
+    # Reads PDFs. Pure Python (no compiled files for Windows Smart App Control to block).
+    "pypdf",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +44,10 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.ruff.lint.isort]
 # backend/alembic/ is the migrations folder; the `alembic` import is the third-party library.
 known-third-party = ["alembic"]
+
+[tool.ruff.lint.per-file-ignores]
+# These test helpers build XML and PDF text, which reads best on one line.
+"tests/office_factory.py" = ["E501"]
 
 [tool.mypy]
 # Strict checking of the application. Run from backend/: `mypy app` (see README).

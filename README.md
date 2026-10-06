@@ -33,11 +33,13 @@ python -m venv .venv
 pip install -r requirements.lock  # the exact, tested versions of every dependency
 pip install --no-deps -e .         # the project itself
 
-alembic upgrade head              # create/update the SQLite database in DATA_DIR
+python -m app migrate              # create/update the SQLite database in DATA_DIR
 python -m app download-model      # one time: download the embedding model into MODELS_DIR
+python -m app download-voice-model  # one time, optional: the speech model for voice orders
 python -m app ingest              # ingest supported files from ALLOWED_FOLDERS, and chunk them
 
-uvicorn app.main:app --reload     # API on http://127.0.0.1:8000 (docs at /docs)
+python -m app serve               # the interface and API on http://127.0.0.1:8000 (docs at /docs); upgrades the database first (after a backup)
+uvicorn app.main:app --reload     # the same API, restarting when code changes (for development)
 pytest                            # tests
 ruff check . ; ruff format --check .
 mypy                              # strict type checking of app/ (configured in pyproject.toml)
@@ -68,10 +70,13 @@ The `--constraint` matters: without it, `pip-compile` picks the newest version o
 
 | Command | What it does |
 |---|---|
-| `ingest` | Ingest, chunk and index files from `ALLOWED_FOLDERS` |
+| `ingest` (or `sync`) | Read your allowed folders (from `.env` and the interface), chunk and index new files, and notice edited and deleted ones |
+| `prune` | Remove documents whose files are gone (shows them first, asks before deleting; `--dry-run`, `--yes`, `--superseded`) |
 | `rechunk` | Rebuild all chunks after changing chunk settings (then re-indexes them) |
 | `index` | Embed documents that are not searchable yet; `--rebuild` re-embeds everything |
-| `status` | Show documents, chunks, and how many are searchable |
+| `serve` | Start the interface and API on this computer only (`--port`, `--no-migrate`); upgrades an out-of-date database first, after saving a backup of it |
+| `migrate` | Create or upgrade the database (the same upgrade `serve` does) |
+| `status` | Show documents, chunks, how many are searchable, and any missing or replaced documents |
 | `search <question>` | Show the most relevant chunks, with scores and sources (`--top-k`, `--type .md`, `--document ID`) |
 | `ask <question>` | Answer a question from your notes, with citations (`--top-k`, `--type`, `--document`) |
 | `check-llm` | Send a test prompt to the local LLM (Ollama) |
@@ -85,16 +90,30 @@ The `--constraint` matters: without it, `pip-compile` picks the newest version o
 | `backup` | Save the library (database and stored files) to one verified archive |
 | `restore` | Restore a backup archive into an empty folder, after verifying every checksum |
 | `types` | List supported file types |
-| `download-model` | Download the embedding model (the only command that uses the internet) |
+| `download-model` | Download the embedding model (uses the internet, once) |
+| `download-voice-model` | Download the speech model (Whisper) for voice orders (uses the internet, once) |
+
+### Keeping the library in step with your folders
+
+Every `ingest` (or `sync`, the same command) records where each file was found, and from that it notices what changed:
+
+- **An edited file** replaces its old version. The new text is searched; the old text is kept as history, never searched, and its vectors are removed. Changing a file back brings the old version back.
+- **A renamed or copied file** is the same document at a second place, not a duplicate.
+- **A deleted file** is marked *missing* only after it was absent from **two syncs in a row**, so an offline cloud folder, an unplugged drive or a moved folder does not look like a deletion. A folder that cannot be read is not judged at all, and if many files vanish from one folder at once the folder is not judged either (it is probably unavailable, and the sync says so). A missing document stops being searched, and comes back if the file returns.
+- Nothing is deleted by a sync. `python -m app prune` lists the missing documents (add `--superseded` to include older versions of edited files), asks, and then removes the document, its text, its search entries and its stored copy, and compacts the database file so the removed text does not stay inside it. `--dry-run` only lists. Your original files are never touched.
+- Removing a document in the interface also removes its older versions, so an edited note's earlier text does not linger.
+
+Where each file was found (the folder and the path inside it) is stored in the database, encrypted with the rest of the library if you encrypted it. Older libraries kept these paths in plain text in `data/library.json`; the first update moves them into the database and empties that list.
 
 ### Search index
 
 Each chunk is embedded (turned into a vector) and stored in [Qdrant](https://qdrant.tech/), which runs embedded inside the app and saves to `DATA_DIR/qdrant`. There is no server or Docker to run.
 
 - `ingest` and `rechunk` index new or changed documents automatically when the model is downloaded; otherwise they say what to run.
+- Indexing shows its progress on the terminal (chunks done, speed, time left) and in the interface. It saves after every batch of chunks, so an interrupted run (Ctrl+C, a closed window, a crash) continues at the first chunk without a vector instead of starting over. On this computer the model embeds about 36 chunks a second whatever the batch size, so a library of 15,000 chunks takes about 7 minutes the first time; storing the vectors is under a tenth of that.
 - Each embedding model gets its own collection, so vectors from different models never mix. After changing `EMBEDDING_MODEL`, run `download-model`, then `index`.
 - The vector store only holds ids and filterable metadata. Chunk text and citations always come from the SQLite database.
-- Only one process can open the vector store at a time. If a command says it is in use, stop the API server or wait for the other command.
+- Only one process can open the vector store at a time. A command that needs it while the server (or another command) holds it waits up to 20 seconds, says so, and then stops with a clear message: stop the server, or use the interface instead.
 
 ### Local LLM (Ollama)
 
@@ -129,6 +148,25 @@ How an answer is made, and why you can trust the sources:
 
 `reason` is one of `answered`, `no_relevant_notes`, `model_declined`, `no_valid_citation`. `ANSWER_MIN_SCORE` was checked with the evaluation set (see [Measuring quality](#measuring-quality)). A 4B-parameter local model can still make mistakes, so use the citations to check the answer against your note.
 
+### General chat
+
+`POST /api/v1/chat` with `{"message": "...", "history": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}` talks to the local model directly. It answers from what the model knows and reads nothing from your library, so it works even when the library is empty or locked. The response has `answer`, `model`, and `truncated` (true when the reply hit the length limit). `history` is optional and holds the earlier turns, oldest first; only the recent ones that fit the model are used.
+
+In the web interface this is how the chat starts. The **MY NOTES** switch next to the message box turns on answers from your notes, with sources, and the choice is remembered.
+
+A general reply is not checked against anything and has no citations, so treat it as unverified: a small local model is often wrong about facts. Only answers from your notes are backed by sources.
+
+### The assistant: identity, memory, actions and voice
+
+General chat is also where the assistant lives. Run `python -m app migrate` once (it adds two small tables), then open **Profile**:
+
+- **Your assistant.** Its name, how it addresses you ("sir" by default) and its role, in your own words. They go into its instructions in every conversation. You can switch off whether it may read the "About you" form and its memories.
+- **Memory.** Short facts that last between sessions. Add them yourself, or say or type "remember that ..." and the assistant saves one (the chat shows `REMEMBERED: ...`). Every memory is listed there and can be deleted one by one or all at once. At most 200 are kept.
+- **Actions.** The assistant can open pages, change the theme, switch sounds, voice and animations on or off, search your notes, start a library update, read out the system status, clear the conversation, lock the application and remember things. That is a fixed list: the model can only ask, the backend and the interface each check every request against the list, and every action taken is shown under the reply. It cannot delete documents or folders, change the password or reach anything outside the application, and those are not on the list at all.
+- **Voice.** Press **VOICE** (or `POST /api/v1/voice/transcribe` with a 16 kHz WAV) and speak; it stops when you pause. Your voice is turned into text by a Whisper model on this computer (`SPEECH_MODEL`, default `openai/whisper-base`, about 290 MB; set `SPEECH_LANGUAGE` such as `en` to skip language detection). Replies are read aloud with a voice installed on this computer, and the assistant greets you when the application opens. All of it is in Settings > Voice. Esc stops it; hands-free mode listens again after each reply.
+
+Spoken orders always go to the assistant, which searches your notes itself when you ask what they say. The small local model sometimes searches your notes for something it already knows about you, or hesitates when two memories disagree; delete the wrong one on the Profile page.
+
 ### Measuring quality
 
 ```powershell
@@ -161,14 +199,28 @@ python -m app search how do I cook porridge
 python -m app search train times --top-k 3 --type md
 ```
 
-Or through the API (start `uvicorn app.main:app`, then try it at http://127.0.0.1:8000/docs):
+Or through the API (start `python -m app serve`, then try it at http://127.0.0.1:8000/docs):
 
 ```
 POST /api/v1/search
 {"query": "how do I cook porridge", "top_k": 3, "file_types": [".md"], "document_ids": [1, 2]}
 ```
 
-Only `query` is required. `top_k` defaults to `RETRIEVAL_TOP_K` (5), up to 50. Each result has a `score` (cosine similarity, higher is closer), the chunk `text`, and its source: file name, heading path, line range, and citation id `<document>:<chunk>`.
+Only `query` is required. `top_k` defaults to `RETRIEVAL_TOP_K` (5), up to 50. Each result has a `score` (cosine similarity, higher is closer), the chunk `text`, and its source: file name, heading path, line range (or pages, for a PDF), and citation id `<document>:<chunk>`.
+
+**Three ways to search** (`mode` in the request, `--mode` on the command line, `SEARCH_MODE` as the default, which is `hybrid`):
+
+| Mode | Finds notes | Good for |
+|---|---|---|
+| `vector` | by meaning | a question put in your own words |
+| `keyword` | by the words in the question | exact codes, names and numbers (`INV-2026-0418`, a surname, an extension) |
+| `hybrid` | both, merged | everything; the default |
+
+Meaning search is good at topics and weak at exact strings: two invoices that differ only in a year look almost the same to it. The keyword side finds the exact code. In hybrid mode a chunk that holds most of the question's words (including the exact code) counts for much more than one that matches a single common word, which is ignored. Every result still carries its meaning similarity as `score`, and that, never the keyword strength, is what the relevance gate (`ANSWER_MIN_SCORE`) looks at, so a keyword match on a note about something else cannot make the assistant answer from it. Results found by their words also carry a `keyword_score`.
+
+The keyword index is built **in memory** from your notes the first time it is needed (about a second for 15,000 chunks) and again after the library changes. It is never written to disk, because the words of an encrypted library must not sit in a plaintext index. Search by words needs SQLite's FTS5, which Python ships with on Windows; if it is missing, hybrid falls back to meaning search and `keyword` reports a clear error. Question words are matched whole (no stemming, accents ignored); a question's operators and quotes are just words.
+
+`python -m app eval` measures all three modes on the same questions, and reports the exact-code questions as their own group. Measured with your embedding model on 2026-10-05 (34 questions whose answer is in the notes): meaning 97.1% right at rank 1, words alone 82.4%, hybrid 100%; on the four exact-code questions 75%, 100% and 100%.
 
 Search always returns the closest chunks, even when none is really relevant. A low score means a weak match, but a high score does not prove the answer is there: in the evaluation, questions on a related topic that the notes cannot answer scored as high as real answers. That is why `ask` also lets the model decline. The query text is never logged.
 
@@ -191,8 +243,14 @@ Run `python -m app.knowledge.ingestion --list-types`, or open `GET /api/v1/inges
 | JSON | `.json` | Must be valid JSON |
 | YAML | `.yaml` `.yml` | Read as text |
 | HTML | `.html` `.htm` | Visible text only; scripts and styles dropped |
+| PDF | `.pdf` | Text of each page, cited by page ("report.pdf, page 12"). Running headers and page numbers are dropped (`PDF_KEEP_HEADERS_FOOTERS=true` keeps them). Scans have no text to read (OCR is not built), and PDFs that ask for a password are skipped |
+| Word | `.docx` | Headings (kept for chunking), lists and tables. The old `.doc` format is not read |
+| Excel | `.xlsx` | Each sheet is a section and each row is read as "column: value" pairs under the first row's headings (the first 5,000 rows per sheet). Formulas are not run: the value saved in the cell is read, so dates show as their serial numbers |
+| PowerPoint | `.pptx` | One section per slide, in presentation order: title, text, tables and speaker notes |
 
-Not supported yet: PDF, DOCX and other Office files, images, audio, video. Everything else is skipped and counted by extension in the ingestion summary.
+Not supported: the old Office formats (`.doc` `.xls` `.ppt`), images and scans (no OCR), audio, video. Everything else is skipped and counted by extension in the ingestion summary.
+
+**How the complicated formats are read safely.** PDF and Office files are read by a separate, time-limited process (`PARSER_TIMEOUT_SECONDS`, 120 s), so a damaged or hostile file cannot hang or crash the program: the worst result is that file failing with a reason, shown in the summary of `ingest` (`no_text`, `encrypted`, `corrupt`, `timeout`, `unsafe_archive`, ...). Office files are read from memory with the standard library only: an archive that unpacks to far more than it should (a zip bomb), has file names that could escape a folder, or contains XML entity declarations is refused; macros are never read or run, and no link inside a file is followed. The worker has no network access and does not get this program's environment variables. A memory limit is not applied: the file-size limit bounds the input, and the time limit stops the rest.
 
 ### Chunking
 
@@ -234,6 +292,31 @@ When Windows cannot unlock the library (for example a restored backup on a new P
 - Encryption uses Windows' cryptography, so it is available on Windows only.
 - A note whose first characters happen to be `reyleight-enc-v1:` would be mistaken for encrypted data in a library that is not encrypted. That is vanishingly unlikely, and it cannot happen in an encrypted one.
 
+## The interface and the API
+
+Everything the commands do is also available in the interface (**Knowledge**) and through the API, so a terminal is never required:
+
+| In the interface | API |
+|---|---|
+| Documents, with the file name, size, passages and whether they are searchable (with paging) | `GET /api/v1/library/documents?offset=&limit=&state=` |
+| **INSPECT** a document: every place it was found, earlier versions of an edited file, and its passages with their headings and lines or pages | `GET /api/v1/library/documents/{id}` and `/chunks?offset=&limit=` |
+| Remove a document (its older versions too) | `DELETE /api/v1/library/documents/{id}` |
+| UPDATE LIBRARY with progress in parts (not only documents), and a history of recent updates that survives a restart | `POST/GET /api/v1/library/sync`, `GET /api/v1/library/jobs` |
+| Counts, model and Ollama state | `GET /api/v1/system/status` |
+| **HISTORY**: saved conversations, reopen, rename, delete | `GET/POST /api/v1/conversations`, `GET/PUT/DELETE /api/v1/conversations/{id}`, `POST .../messages` |
+| A cited answer that appears as it is written | `POST /api/v1/ask/stream` (server-sent events) |
+| What the program is set to do (read-only) | `GET /api/v1/system/settings` |
+
+One update runs at a time; asking for a second while one runs is refused. The history holds only counts and short sentences, never file names or paths. The TypeScript types in `frontend/src/api/types.ts` are checked against the API's own description by a test (`tests/unit/test_frontend_contract.py`), so a field added on one side only fails the build instead of showing up as a blank in the interface.
+
+The API only accepts requests that name this computer, from this computer, and limits their size and number; see `docs/security.md`.
+
+### Conversations, follow-ups and streaming
+
+- **Saved conversations.** What you say and what comes back is kept on this computer, so a conversation can be reopened, renamed or deleted from **HISTORY** in the chat. The **SAVE** switch turns saving off. Titles, messages and the sources shown beside an answer are stored in encrypted columns when the library is encrypted. Deleting a conversation removes it and every message in it for good (the database overwrites deleted rows). If a note is removed from the library, the answers that quoted it are replaced by a short notice, so a removed note does not live on inside a conversation. `CONVERSATION_RETENTION_DAYS` in `.env` deletes conversations that were not touched for that many days; the default, 0, keeps them until you delete them.
+- **Follow-up questions.** When you ask the notes something like "and how much was it?", the model first rewrites it into a question that stands alone, using the last few turns, and the interface shows what was searched for. The first message of a conversation is never rewritten. The answer is still built from the notes and checked exactly as before; a rewrite can never make an unrelated question answerable. `python -m app eval --answers` measures this on a group of follow-up questions (6 of 7 with the local model on 2026-10-05; the miss is a year hidden inside an invoice number).
+- **Streaming.** A cited answer appears as the model writes it (about 0.1 s to the first words instead of waiting for the whole answer) and a STOP button ends it. The streamed text is marked NOT CHECKED YET: citations are only verified when the answer is complete, and the checked answer then replaces what was streamed. An answer that cites a note that does not exist is refused at the end, exactly as without streaming. Streaming applies to answers from your notes; general chat answers in one piece.
+
 ## Checking and protecting your library
 
 ```powershell
@@ -252,7 +335,9 @@ python -m app restore FILE --to C:\restored-library
 
 - **"blocked by an Application Control policy" (Windows).** Smart App Control can block newly installed compiled library files. Reyleight works around the one that matters here: if scikit-learn cannot be loaded, it is replaced by a placeholder, because only unused helper functions of sentence-transformers need it (a warning is logged, and embeddings are unaffected). If a different library file is blocked, the command stops with a one-line error; re-running while online sometimes clears it. Reyleight never changes Windows security settings.
 - **"ollama is not reachable".** Open the Ollama app or run `ollama serve`, then retry. `python -m app status` shows its state.
-- **"search index is in use by another process".** Only one program can open the vector index at a time. Stop the API server or wait for the running command.
+- **"search index is in use by another process".** Only one program can open the vector index at a time. Commands wait about 20 seconds for it; if it is still busy, stop the API server or wait for the running command.
+- **"the database is out of date".** Run `python -m app migrate` (or start the server with `python -m app serve`, which does it for you after saving a backup to `%LOCALAPPDATA%\Reyleight\backups`). `alembic.exe` can be blocked by Smart App Control; `python -m alembic upgrade head` does the same thing.
+- **"This address is not allowed" (400) or "Requests from other websites are not allowed" (403).** The API only answers requests that name this computer. If you reach it through another name or from the development server, list it in `ALLOWED_HOSTS` or `CORS_ORIGINS` in `.env`.
 
 ## Configuration
 

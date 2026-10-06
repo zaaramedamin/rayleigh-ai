@@ -11,17 +11,20 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.ai.embeddings.base import EmbeddingProvider
-from app.ai.llm.base import LLMError, LLMProvider
+from app.ai.llm.base import ChatMessage, LLMError, LLMProvider, Role
 from app.evaluation.dataset import Dataset, EvalQuestion, ExpectedSource
+from app.knowledge.answering.rewrite import standalone_question
 from app.knowledge.answering.service import Answer, compose_answer
 from app.knowledge.indexing.service import index_pending
 from app.knowledge.ingestion.service import ingest_folders
-from app.knowledge.retrieval.service import RetrievedChunk, retrieve
+from app.knowledge.retrieval.keyword import KeywordSearchUnavailable
+from app.knowledge.retrieval.service import SEARCH_MODES, RetrievedChunk, SearchMode, retrieve
 from app.storage.database import Base, create_db_engine
 from app.storage.models import Chunk
 from app.storage.vector_store import QdrantVectorStore
@@ -56,6 +59,22 @@ class AnswerOutcome:
 
 
 @dataclass
+class FollowUpOutcome:
+    """A question asked after an earlier exchange, rewritten before the notes were searched."""
+
+    question: EvalQuestion
+    searched_for: str  # what the rewrite turned the message into
+    first_hit_rank: int | None  # where the expected note ranked for that rewrite
+    answer: Answer | None
+    problems: list[str]
+    seconds: float
+
+    @property
+    def passed(self) -> bool:
+        return not self.problems
+
+
+@dataclass
 class EvalRun:
     embedding_model: str
     llm_model: str | None
@@ -68,6 +87,11 @@ class EvalRun:
     ingest_failures: int
     retrieval: list[RetrievalOutcome]
     answers: list[AnswerOutcome] = field(default_factory=list)
+    # The search mode `retrieval` and `answers` were run with, and the retrieval outcomes of
+    # every mode that could run, so the modes can be compared on the same questions.
+    mode: SearchMode = "vector"
+    by_mode: dict[str, list[RetrievalOutcome]] = field(default_factory=dict)
+    follow_ups: list[FollowUpOutcome] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -97,7 +121,13 @@ class GateAnalysis:
 def chunk_matches(chunk: RetrievedChunk, expected: ExpectedSource) -> bool:
     if chunk.source != expected.file:
         return False
-    return expected.heading is None or expected.heading.lower() in chunk.heading_path.lower()
+    if expected.heading is not None and expected.heading.lower() not in chunk.heading_path.lower():
+        return False
+    if expected.page is None:
+        return True
+    if chunk.start_page is None:
+        return False
+    return chunk.start_page <= expected.page <= (chunk.end_page or chunk.start_page)
 
 
 def first_hit_rank(question: EvalQuestion, results: Sequence[RetrievedChunk]) -> int | None:
@@ -241,11 +271,17 @@ def prepared_corpus(
 
 
 def run_retrieval(
-    corpus: PreparedCorpus, embedder: EmbeddingProvider, dataset: Dataset, top_k: int
+    corpus: PreparedCorpus,
+    embedder: EmbeddingProvider,
+    dataset: Dataset,
+    top_k: int,
+    mode: SearchMode = "vector",
 ) -> list[RetrievalOutcome]:
     outcomes = []
     for question in dataset.questions:
-        results = retrieve(corpus.session, embedder, corpus.store, question.question, top_k=top_k)
+        results = retrieve(
+            corpus.session, embedder, corpus.store, question.question, top_k=top_k, mode=mode
+        )
         outcomes.append(RetrievalOutcome(question, results, first_hit_rank(question, results)))
     return outcomes
 
@@ -271,6 +307,48 @@ def run_answers(
     return results
 
 
+def run_follow_ups(
+    corpus: PreparedCorpus,
+    embedder: EmbeddingProvider,
+    llm: LLMProvider,
+    dataset: Dataset,
+    *,
+    top_k: int,
+    min_score: float,
+    mode: SearchMode,
+    only_ids: set[str] | None = None,
+) -> list[FollowUpOutcome]:
+    """Each follow-up goes through the same steps as `/ask` with a history: rewrite it into a
+    standalone question, search for that, answer from what was found."""
+    outcomes = []
+    for question in dataset.follow_ups:
+        if only_ids is not None and question.id not in only_ids:
+            continue
+        started = time.monotonic()
+        history = [ChatMessage(cast(Role, role), text) for role, text in question.history]
+        try:
+            searched_for = standalone_question(llm, question.question, history).text
+            results = retrieve(
+                corpus.session, embedder, corpus.store, searched_for, top_k=top_k, mode=mode
+            )
+            answer = compose_answer(llm, searched_for, results, min_score)
+            problems = check_answer(question, answer)
+            rank = first_hit_rank(question, results)
+        except LLMError as exc:
+            searched_for, rank, answer, problems = (
+                question.question,
+                None,
+                None,
+                [f"model error: {exc}"],
+            )
+        outcomes.append(
+            FollowUpOutcome(
+                question, searched_for, rank, answer, problems, time.monotonic() - started
+            )
+        )
+    return outcomes
+
+
 def run_evaluation(
     embedder: EmbeddingProvider,
     dataset: Dataset,
@@ -281,13 +359,37 @@ def run_evaluation(
     chunk_size: int,
     chunk_overlap: int,
     answer_ids: set[str] | None = None,
+    mode: SearchMode = "vector",
 ) -> EvalRun:
-    """Retrieval metrics for every question, plus answer checks when an LLM is given."""
+    """Retrieval metrics for every question and every search mode, plus answer checks when an
+    LLM is given. `retrieval` and the answers use `mode`."""
     with prepared_corpus(
         dataset, embedder, chunk_size=chunk_size, chunk_overlap=chunk_overlap
     ) as corpus:
-        retrieval = run_retrieval(corpus, embedder, dataset, top_k)
+        by_mode: dict[str, list[RetrievalOutcome]] = {}
+        for each in SEARCH_MODES:
+            try:
+                by_mode[each] = run_retrieval(corpus, embedder, dataset, top_k, each)
+            except KeywordSearchUnavailable:
+                continue  # this SQLite has no FTS5: the other modes still run
+        if mode not in by_mode:
+            raise KeywordSearchUnavailable("this SQLite was built without FTS5")
+        retrieval = by_mode[mode]
         answers = run_answers(llm, retrieval, min_score, answer_ids) if llm is not None else []
+        follow_ups = (
+            run_follow_ups(
+                corpus,
+                embedder,
+                llm,
+                dataset,
+                top_k=top_k,
+                min_score=min_score,
+                mode=mode,
+                only_ids=answer_ids,
+            )
+            if llm is not None
+            else []
+        )
         return EvalRun(
             embedding_model=embedder.model_name,
             llm_model=getattr(llm, "model_name", None) if llm is not None else None,
@@ -300,4 +402,7 @@ def run_evaluation(
             ingest_failures=corpus.ingest_failures,
             retrieval=retrieval,
             answers=answers,
+            mode=mode,
+            by_mode=by_mode,
+            follow_ups=follow_ups,
         )

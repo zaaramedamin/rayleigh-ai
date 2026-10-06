@@ -149,6 +149,8 @@ pygments==2.21.0
     # via
     #   pytest
     #   rich
+pypdf==6.19.0
+    # via reyleight-backend (pyproject.toml)
 pytest==9.1.1
     # via reyleight-backend (pyproject.toml)
 python-dotenv==1.2.3

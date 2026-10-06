@@ -5,14 +5,19 @@ from pathlib import Path
 import pytest
 
 import app.ai.embeddings.download as download_module
+import app.ai.speech.download as speech_download_module
 from app import cli
 from app.ai.llm.base import LLMModelNotFoundError, LLMUnavailableError
 from app.cli import main
 from app.core.config import Settings
+from app.evaluation.dataset import DEFAULT_EVAL_DIR
 from app.storage.vector_store import QdrantVectorStore, collection_name
 from tests.fakes import FakeLLM, HashingEmbedder
 
 MakeSettings = Callable[..., Settings]
+
+# How many notes the shipped evaluation corpus holds, so tests do not break when it grows.
+CORPUS_DOCUMENTS = sum(1 for p in (DEFAULT_EVAL_DIR / "corpus").rglob("*") if p.is_file())
 
 
 @pytest.fixture(autouse=True)
@@ -68,7 +73,7 @@ def test_ingest_refuses_a_database_that_is_not_migrated(
 ) -> None:
     assert main(["ingest"], settings=make_settings(allowed_folders=[notes])) == 1
 
-    assert "alembic upgrade head" in capsys.readouterr().err
+    assert "python -m app migrate" in capsys.readouterr().err
 
 
 def test_ingest_end_to_end(
@@ -122,6 +127,55 @@ def test_download_failure_is_reported_not_raised(
     monkeypatch.setattr(download_module, "download_model", fail)
 
     assert main(["download-model"], settings=make_settings()) == 1
+
+    assert "download failed: OSError: network unreachable" in capsys.readouterr().err
+
+
+def test_download_voice_model_does_nothing_when_already_present(
+    capsys: pytest.CaptureFixture[str], make_settings: MakeSettings, models_dir: Path
+) -> None:
+    target = models_dir / "openai__whisper-base"
+    target.mkdir(parents=True)
+    (target / "config.json").write_text("{}")
+
+    assert main(["download-voice-model"], settings=make_settings()) == 0
+
+    assert "speech model already downloaded" in capsys.readouterr().out
+
+
+def test_download_voice_model_downloads_the_configured_model(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    models_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        speech_download_module,
+        "download_speech_model",
+        lambda name, folder: asked.append((name, folder)),
+    )
+
+    assert (
+        main(["download-voice-model"], settings=make_settings(speech_model="openai/whisper-small"))
+        == 0
+    )
+
+    assert asked == [("openai/whisper-small", models_dir)]
+    assert "downloading openai/whisper-small" in capsys.readouterr().out
+
+
+def test_voice_model_download_failure_is_reported_not_raised(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> Path:
+        raise OSError("network unreachable")
+
+    monkeypatch.setattr(speech_download_module, "download_speech_model", fail)
+
+    assert main(["download-voice-model"], settings=make_settings()) == 1
 
     assert "download failed: OSError: network unreachable" in capsys.readouterr().err
 
@@ -425,7 +479,7 @@ def test_eval_prints_retrieval_and_gate_sections(
 
     out = capsys.readouterr().out
     assert "EVALUATION" in out
-    assert "corpus: 12 documents" in out
+    assert f"corpus: {CORPUS_DOCUMENTS} documents" in out
     assert "RETRIEVAL" in out
     assert "RELEVANCE GATE" in out
     assert "ANSWERS" not in out
@@ -448,7 +502,7 @@ def test_eval_with_answers_checks_them_and_writes_json(
     assert fake_llm.calls  # the model was asked about at least one question
     import json
 
-    assert json.loads(output.read_text(encoding="utf-8"))["corpus"]["documents"] == 12
+    assert json.loads(output.read_text(encoding="utf-8"))["corpus"]["documents"] == CORPUS_DOCUMENTS
     assert f"written to {output}" in out
 
 
@@ -700,7 +754,7 @@ def test_doctor_exits_one_and_names_the_fix_when_something_is_broken(
 
     out = capsys.readouterr().out
     assert "FAIL  database" in out
-    assert "fix: alembic upgrade head" in out
+    assert "fix: python -m app migrate" in out
 
 
 def test_doctor_accepts_fix_and_quick(
@@ -748,7 +802,7 @@ def test_eval_can_use_a_custom_set_from_anywhere(
     assert main(["eval", "--set", str(eval_set)], settings=make_settings()) == 0
 
     out = capsys.readouterr().out
-    assert "corpus: 2 documents" in out  # the custom corpus, not the built-in 12 notes
+    assert "corpus: 2 documents" in out  # the custom corpus, not the built-in notes
     assert "RETRIEVAL  (1 questions" in out
 
 
@@ -776,3 +830,43 @@ def test_a_custom_set_never_touches_the_users_library(
 
     assert not data_dir.exists()
     assert sorted(p.name for p in eval_set.rglob("*")) == before  # the set itself is unchanged
+
+
+def test_search_by_words_shows_the_keyword_score(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    notes: Path,
+    fake_model: HashingEmbedder,
+) -> None:
+    settings = make_settings(allowed_folders=[notes])
+    main(["ingest"], settings=settings)
+    capsys.readouterr()
+
+    assert main(["search", "--mode", "keyword", "plain", "note"], settings=settings) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "b.txt" in lines[0] and "keyword " in lines[0]
+
+
+def test_search_by_meaning_shows_no_keyword_score(
+    capsys: pytest.CaptureFixture[str],
+    make_settings: MakeSettings,
+    migrated_data_dir: Path,
+    notes: Path,
+    fake_model: HashingEmbedder,
+) -> None:
+    settings = make_settings(allowed_folders=[notes])
+    main(["ingest"], settings=settings)
+    capsys.readouterr()
+
+    assert main(["search", "--mode", "vector", "plain", "note"], settings=settings) == 0
+
+    assert "keyword" not in capsys.readouterr().out.splitlines()[0]
+
+
+def test_an_unknown_search_mode_is_a_usage_error(make_settings: MakeSettings) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["search", "--mode", "fuzzy", "x"], settings=make_settings())
+
+    assert raised.value.code == 2

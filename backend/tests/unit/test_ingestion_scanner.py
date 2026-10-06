@@ -64,7 +64,7 @@ def test_finds_supported_files_recursively(allowed: Path) -> None:
 
 
 def test_skips_unsupported_hidden_and_ignored(allowed: Path) -> None:
-    (allowed / "doc.pdf").write_text("x")
+    (allowed / "photo.png").write_text("x")
     (allowed / "run.exe").write_text("x")
     (allowed / ".secret.txt").write_text("x")
     for name in (".git", ".obsidian", "node_modules"):
@@ -148,14 +148,14 @@ def test_nested_allow_list_entries_do_not_duplicate_files(allowed: Path) -> None
 
 
 def test_unsupported_files_are_counted_by_extension(allowed: Path) -> None:
-    for name in ("a.pdf", "b.PDF", "c.exe", "README"):
+    for name in ("a.png", "b.PNG", "c.exe", "README"):
         (allowed / name).write_text("x")
     (allowed / "ok.csv").write_text("a,b")
 
     result = scan_allowed_folders([allowed])
 
     assert _names(result.files) == {"ok.csv"}
-    assert result.unsupported_by_extension == {".pdf": 2, ".exe": 1, "(none)": 1}
+    assert result.unsupported_by_extension == {".png": 2, ".exe": 1, "(none)": 1}
     assert result.skipped_unsupported == 4
 
 

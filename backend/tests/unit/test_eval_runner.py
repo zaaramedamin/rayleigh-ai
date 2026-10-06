@@ -3,7 +3,7 @@ import json
 import pytest
 
 from app.ai.llm.base import LLMUnavailableError
-from app.evaluation.dataset import EvalQuestion, ExpectedSource, load_dataset
+from app.evaluation.dataset import DEFAULT_EVAL_DIR, EvalQuestion, ExpectedSource, load_dataset
 from app.evaluation.report import format_report, to_dict
 from app.evaluation.runner import (
     RetrievalOutcome,
@@ -18,6 +18,9 @@ from app.evaluation.runner import (
 from app.knowledge.answering.service import Answer, Source
 from app.knowledge.retrieval.service import RetrievedChunk
 from tests.fakes import FakeLLM, HashingEmbedder
+
+# How many notes the shipped evaluation corpus holds, so tests do not break when it grows.
+CORPUS_DOCUMENTS = sum(1 for p in (DEFAULT_EVAL_DIR / "corpus").rglob("*") if p.is_file())
 
 
 def chunk(
@@ -200,7 +203,7 @@ def test_the_shipped_corpus_ingests_cleanly_through_the_real_pipeline(dataset) -
     result = run(dataset)
 
     assert result.ingest_failures == 0
-    assert result.documents == 12
+    assert result.documents == CORPUS_DOCUMENTS
     assert result.chunks >= 12
     assert len(result.retrieval) == len(dataset.questions)
     assert result.answers == []
@@ -266,7 +269,7 @@ def test_the_report_has_every_section_and_the_json_round_trips(dataset) -> None:
 
     for heading in ("EVALUATION", "RETRIEVAL", "RELEVANCE GATE", "ANSWERS"):
         assert heading in text
-    assert payload["corpus"]["documents"] == 12
+    assert payload["corpus"]["documents"] == CORPUS_DOCUMENTS
     assert payload["retrieval"]["hit_rate"].keys() == {"hit@1", "hit@3", "hit@5"}
     assert len(payload["retrieval"]["questions"]) == len(dataset.questions)
     assert payload["answers"][0]["id"] == "oats-simmer"
@@ -274,3 +277,114 @@ def test_the_report_has_every_section_and_the_json_round_trips(dataset) -> None:
 
 def test_the_report_without_answers_has_no_answers_section(dataset) -> None:
     assert "ANSWERS" not in format_report(run(dataset))
+
+
+def test_every_search_mode_is_measured_on_the_same_questions(dataset) -> None:
+    result = run(dataset)
+
+    assert set(result.by_mode) == {"vector", "keyword", "hybrid"}
+    assert all(len(outcomes) == len(dataset.questions) for outcomes in result.by_mode.values())
+    assert result.retrieval is result.by_mode[result.mode]
+
+
+def test_the_report_compares_the_modes_and_the_question_groups(dataset) -> None:
+    result = run(dataset)
+
+    text = format_report(result)
+    payload = json.loads(json.dumps(to_dict(result)))
+
+    assert "SEARCH MODES" in text
+    for name in ("vector", "keyword", "hybrid"):
+        assert name in text and "hit@1" in payload["modes"][name]["hit_rate"]
+    assert "exact-match" in text  # the shipped set has a group of exact-code questions
+    assert "exact-match" in payload["modes"]["hybrid"]["groups"]
+
+
+def test_the_mode_the_gate_and_answers_use_can_be_chosen(dataset) -> None:
+    result = run(dataset, mode="keyword")
+
+    assert result.mode == "keyword" and result.retrieval is result.by_mode["keyword"]
+    assert "search mode keyword" in format_report(result)
+
+
+# --- follow-up questions ---------------------------------------------------------------------
+
+
+def test_follow_ups_need_the_model_and_are_not_part_of_the_retrieval_numbers(dataset) -> None:
+    result = run(dataset)
+
+    assert result.follow_ups == []
+    assert len(result.retrieval) == len(dataset.questions)
+
+
+def test_a_follow_up_is_rewritten_searched_and_answered(dataset) -> None:
+    llm = FakeLLM()
+    llm.script = [
+        "How much was invoice INV-2026-0418 for the Lisbon workshop?",
+        "Invoice INV-2026-0418 totals 1,284.50 euros [1].",
+    ]
+
+    result = run(dataset, llm=llm, answer_ids={"fu-invoice-amount"})
+
+    (outcome,) = result.follow_ups
+    assert outcome.searched_for == "How much was invoice INV-2026-0418 for the Lisbon workshop?"
+    assert outcome.first_hit_rank == 1
+    assert outcome.passed, outcome.problems
+    rewrite_prompt = llm.calls[0][1]
+    assert "When was invoice INV-2026-0418 paid?" in rewrite_prompt  # the earlier exchange
+    assert "Latest message: And how much was it?" in rewrite_prompt
+
+
+def test_a_follow_up_fails_when_the_answer_comes_from_the_wrong_note(dataset) -> None:
+    llm = FakeLLM()
+    llm.script = [
+        "How much was invoice INV-2025-0418 for the Madrid conference?",
+        "Invoice INV-2025-0418 totals 2,150.00 euros [1].",
+    ]
+
+    result = run(dataset, llm=llm, answer_ids={"fu-invoice-amount"})
+
+    (outcome,) = result.follow_ups
+    assert not outcome.passed
+    assert any("2,150" in problem for problem in outcome.problems)
+
+
+def test_a_follow_up_the_notes_cannot_answer_must_be_refused(dataset) -> None:
+    llm = FakeLLM("INSUFFICIENT")
+    llm.script = ["How long is the battery life of the router?"]
+
+    result = run(dataset, llm=llm, answer_ids={"fu-no-answer"})
+
+    assert [o.passed for o in result.follow_ups] == [True]
+
+
+def test_only_the_requested_follow_ups_run(dataset) -> None:
+    result = run(dataset, llm=FakeLLM("INSUFFICIENT"), answer_ids={"oats-simmer"})
+
+    assert result.follow_ups == []
+
+
+def test_a_model_that_cannot_be_reached_fails_the_follow_ups_without_stopping_the_run(
+    dataset,
+) -> None:
+    llm = FakeLLM(error=LLMUnavailableError("Ollama is not reachable"))
+
+    result = run(dataset, llm=llm, answer_ids={"fu-invoice-amount", "fu-printer-serial"})
+
+    assert len(result.follow_ups) == 2
+    assert all(not o.passed for o in result.follow_ups)
+
+
+def test_the_report_lists_failed_follow_ups_with_what_was_searched_for(dataset) -> None:
+    llm = FakeLLM("INSUFFICIENT")
+    llm.script = ["something else entirely"]
+
+    result = run(dataset, llm=llm, answer_ids={"fu-invoice-amount"})
+    text = format_report(result)
+
+    assert "FOLLOW-UP QUESTIONS" in text
+    assert "0/1 answered correctly" in text
+    assert "searched for 'something else entirely'" in text
+    follow_ups = to_dict(result)["follow_ups"]
+    assert follow_ups[0]["id"] == "fu-invoice-amount" and follow_ups[0]["passed"] is False
+    json.dumps(to_dict(result))  # still plain JSON

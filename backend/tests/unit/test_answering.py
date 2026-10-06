@@ -10,11 +10,14 @@ from app.knowledge.answering.service import (
     DECLINE_MESSAGES,
     MAX_CONTEXT_CHARS,
     SYSTEM_PROMPT,
+    Finished,
+    Token,
     answer_question,
     build_prompt,
     compose_answer,
     resolve_citations,
     select_context,
+    stream_answer,
 )
 from app.knowledge.retrieval.service import RetrievedChunk
 from app.storage.vector_store import QdrantVectorStore
@@ -357,3 +360,125 @@ def test_a_bad_question_is_rejected_before_anything_else(
     with pytest.raises(ValueError):
         answer_question(session, embedder, store, llm, "   ", top_k=3, min_score=0.3)
     assert llm.calls == []
+
+
+# --- streaming ---------------------------------------------------------------------------------
+
+
+def streamed(llm: FakeLLM, notes: list[RetrievedChunk], min_score: float = 0.3) -> list:
+    return list(stream_answer(llm, "How do I cook oats?", notes, min_score))
+
+
+def tokens_of(events: list) -> str:
+    return "".join(e.text for e in events if isinstance(e, Token))
+
+
+def test_no_relevant_notes_ends_at_once_without_calling_the_model() -> None:
+    llm = FakeLLM("never used")
+
+    events = streamed(llm, [note(1, score=0.1)])
+
+    assert [type(e) for e in events] == [Finished]
+    assert events[0].answer.reason == "no_relevant_notes"
+    assert llm.calls == []
+
+
+def test_an_answer_streams_in_pieces_and_ends_with_the_checked_answer() -> None:
+    llm = FakeLLM("Simmer the oats in milk [1].")
+
+    events = streamed(llm, [note(1)])
+
+    assert len([e for e in events if isinstance(e, Token)]) > 3  # more than one piece
+    assert tokens_of(events) == "Simmer the oats in milk [1]."
+    final = events[-1]
+    assert isinstance(final, Finished)
+    assert (final.answer.grounded, final.answer.reason) == (True, "answered")
+    assert [s.citation_id for s in final.answer.sources] == ["1:0"]
+
+
+@pytest.mark.parametrize(
+    "reply", ["INSUFFICIENT", "insufficient.", "**INSUFFICIENT**", " \nINSUFFICIENT"]
+)
+def test_a_refusal_is_never_streamed_as_if_it_were_an_answer(reply: str) -> None:
+    events = streamed(FakeLLM(reply), [note(1)])
+
+    assert tokens_of(events) == ""
+    assert isinstance(events[-1], Finished)
+    assert events[-1].answer.reason == "model_declined"
+
+
+def test_an_answer_that_only_starts_like_the_refusal_word_is_streamed_whole() -> None:
+    reply = "Insulin is not mentioned, but oats have fibre [1]."
+
+    events = streamed(FakeLLM(reply), [note(1)])
+
+    assert tokens_of(events) == reply
+    assert events[-1].answer.grounded is True
+
+
+def test_a_reply_that_ends_while_it_could_still_be_the_refusal_word_is_not_lost() -> None:
+    events = streamed(FakeLLM("IN"), [note(1)])
+
+    assert tokens_of(events) == "IN"
+    assert events[-1].answer.reason == "no_valid_citation"
+
+
+def test_a_long_start_without_letters_is_not_held_back_for_ever() -> None:
+    reply = "-" * 60 + " Oats [1]."
+
+    events = streamed(FakeLLM(reply), [note(1)])
+
+    assert tokens_of(events) == reply
+
+
+def test_the_streamed_text_is_unverified_and_the_final_answer_replaces_it() -> None:
+    # The model invents a citation: the stream carries the raw words, the end refuses.
+    events = streamed(FakeLLM("Oats take five minutes [7]."), [note(1)])
+
+    assert tokens_of(events) == "Oats take five minutes [7]."
+    final = events[-1].answer
+    assert (final.grounded, final.reason) == (False, "no_valid_citation")
+    assert "five minutes" not in final.text
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Simmer the oats in milk [1].",
+        "Oats are high in fibre [1, 2].",
+        "Oats take five minutes.",
+        "INSUFFICIENT",
+        "Oats [1][1] and [9].",
+        "",
+    ],
+)
+def test_the_final_answer_is_the_same_as_without_streaming(reply: str) -> None:
+    notes = [note(1), note(2, text="Rice needs water.", source="rice.txt")]
+
+    final = streamed(FakeLLM(reply), notes)[-1].answer
+
+    assert final == compose_answer(FakeLLM(reply), "How do I cook oats?", notes, 0.3)
+
+
+def test_closing_the_stream_stops_the_model_and_finishes_nothing() -> None:
+    llm = FakeLLM("A long answer that is still being written [1].")
+    events = stream_answer(llm, "How do I cook oats?", [note(1)], 0.3)
+    assert isinstance(next(events), Token)
+
+    events.close()
+
+    assert llm.streams_closed_early == 1
+
+
+def test_a_model_error_in_the_middle_surfaces_after_what_was_already_sent() -> None:
+    llm = FakeLLM("Simmer the oats in milk [1].")
+    llm.stream_error_after = (2, LLMTimeoutError("too slow"))
+    received: list[str] = []
+
+    with pytest.raises(LLMTimeoutError):
+        for event in stream_answer(llm, "How do I cook oats?", [note(1)], 0.3):
+            if isinstance(event, Token):
+                received.append(event.text)
+
+    assert "Simmer the oats in milk [1].".startswith("".join(received))
+    assert received  # something was shown before the error

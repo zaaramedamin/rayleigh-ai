@@ -64,12 +64,24 @@ def create_db_engine(data_dir: Path, *, passphrase: str | None = None) -> Engine
         attach_vault(engine, keystore.unlock(data_dir, passphrase=passphrase).vault)
 
     @event.listens_for(engine, "connect")
-    def _enable_foreign_keys(
+    def _configure_connection(
         dbapi_connection: DBAPIConnection, _connection_record: ConnectionPoolEntry
     ) -> None:
-        # SQLite ignores foreign keys (and ON DELETE CASCADE) unless this is enabled per connection.
         cursor = dbapi_connection.cursor()
+        # SQLite ignores foreign keys (and ON DELETE CASCADE) unless this is enabled per connection.
         cursor.execute("PRAGMA foreign_keys=ON")
+        # Deleted rows are overwritten with zeros instead of being left in the file: a removed
+        # note's text should not be readable in the database afterwards.
+        cursor.execute("PRAGMA secure_delete=ON")
         cursor.close()
 
     return engine
+
+
+def vacuum_database(engine: Engine) -> None:
+    """Rewrite the database file, so space freed by deleted rows is returned and holds no old text.
+
+    VACUUM cannot run inside a transaction, hence the autocommit connection.
+    """
+    with engine.connect() as connection:
+        connection.execution_options(isolation_level="AUTOCOMMIT").exec_driver_sql("VACUUM")

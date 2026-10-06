@@ -110,3 +110,72 @@ def test_duplicate_corpus_file_names_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(DatasetError, match="file names must be unique"):
         load_dataset(tmp_path)
+
+
+# --- follow-up questions ---------------------------------------------------------------------
+
+HISTORY = [
+    {"role": "user", "content": "What is it?"},
+    {"role": "assistant", "content": "It is x [1]."},
+]
+FOLLOW_UP = {**ANSWERABLE, "id": "f1", "question": "And more?", "history": HISTORY}
+
+
+def _write_with_follow_ups(tmp_path: Path, follow_ups: object) -> Path:
+    (tmp_path / "corpus").mkdir()
+    (tmp_path / "corpus" / "a.md").write_text("text", encoding="utf-8")
+    payload = {"questions": [ANSWERABLE], "follow_ups": follow_ups}
+    (tmp_path / "questions.json").write_text(json.dumps(payload), encoding="utf-8")
+    return tmp_path
+
+
+def test_the_shipped_set_has_follow_ups_with_an_earlier_exchange() -> None:
+    dataset = load_dataset()
+
+    assert len(dataset.follow_ups) >= 5
+    assert any(q.type == "unanswerable" for q in dataset.follow_ups)
+    for question in dataset.follow_ups:
+        assert question.history[0][0] == "user", question.id
+    ids = [q.id for q in (*dataset.questions, *dataset.follow_ups)]
+    assert len(ids) == len(set(ids))
+    # They are kept apart: the retrieval-only measurements must not need the model.
+    assert not any(q.history for q in dataset.questions)
+
+
+def test_a_follow_up_keeps_its_earlier_exchange(tmp_path: Path) -> None:
+    dataset = load_dataset(_write_with_follow_ups(tmp_path, [FOLLOW_UP]))
+
+    assert [q.id for q in dataset.questions] == ["q1"]
+    assert dataset.follow_ups[0].history == (("user", "What is it?"), ("assistant", "It is x [1]."))
+
+
+@pytest.mark.parametrize(
+    ("follow_up", "message"),
+    [
+        ({k: v for k, v in FOLLOW_UP.items() if k != "history"}, "history must be a list"),
+        ({**FOLLOW_UP, "history": []}, "history must be a list"),
+        ({**FOLLOW_UP, "history": [HISTORY[1], HISTORY[0]]}, "must start with the user"),
+        ({**FOLLOW_UP, "history": [{"role": "system", "content": "x"}]}, "each history turn"),
+        ({**FOLLOW_UP, "history": [{"role": "user", "content": " "}]}, "each history turn"),
+        ({**FOLLOW_UP, "history": [HISTORY[0]] * 9}, "history must be a list"),
+        ({**FOLLOW_UP, "id": "q1"}, "unique"),
+    ],
+)
+def test_malformed_follow_ups_are_rejected(tmp_path: Path, follow_up: dict, message: str) -> None:
+    with pytest.raises(DatasetError, match=message):
+        load_dataset(_write_with_follow_ups(tmp_path, [follow_up]))
+
+
+def test_a_history_in_the_ordinary_questions_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "corpus").mkdir()
+    (tmp_path / "corpus" / "a.md").write_text("text", encoding="utf-8")
+    payload = {"questions": [{**ANSWERABLE, "history": HISTORY}]}
+    (tmp_path / "questions.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(DatasetError, match="belongs in the follow_ups list"):
+        load_dataset(tmp_path)
+
+
+def test_follow_ups_must_be_a_list(tmp_path: Path) -> None:
+    with pytest.raises(DatasetError, match="'follow_ups' must be a list"):
+        load_dataset(_write_with_follow_ups(tmp_path, {"id": "x"}))
