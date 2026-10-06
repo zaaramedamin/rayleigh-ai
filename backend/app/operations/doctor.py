@@ -22,6 +22,13 @@ from app.ai.llm.base import LLMError, LLMUnavailableError
 from app.core.config import Settings
 from app.knowledge.components import create_llm, vector_store_path
 from app.knowledge.indexing.service import count_stale_vectors, library_counts
+from app.operations.windows import (
+    LOOKBACK_DAYS,
+    bitlocker_protection,
+    recent_blocked_files,
+    scikit_learn_loads,
+    summarise,
+)
 from app.security import keystore
 from app.security.errors import (
     DecryptionError,
@@ -197,6 +204,85 @@ def _check_windows_protection() -> Check | None:
         "ok",
         f"{state}: it can block newly installed compiled libraries "
         "(Reyleight already works around scikit-learn; see the README troubleshooting)",
+    )
+
+
+def _check_scikit_learn() -> Check | None:
+    loads = scikit_learn_loads()
+    if loads is None:
+        return None
+    if loads:
+        return Check("scikit-learn", "ok", "loads normally (the part sentence-transformers needs)")
+    return Check(
+        "scikit-learn",
+        "ok",
+        "cannot be loaded here (Windows blocks unsigned compiled libraries it has not seen); "
+        "Reyleight uses a placeholder for it, which does not affect embeddings",
+    )
+
+
+def _check_bitlocker(settings: Settings) -> Check | None:
+    """Is the drive that holds the library encrypted by Windows? Reported, never changed."""
+    if sys.platform != "win32":
+        return None
+    manual = (
+        "Settings > Privacy & security > Device encryption (or BitLocker), "
+        "or `manage-bde -status` in a window opened as administrator"
+    )
+    value = bitlocker_protection(settings.data_dir)
+    if value is None:
+        return Check(
+            "BitLocker",
+            "ok",
+            f"could not ask Windows whether the drive that holds your library is encrypted; "
+            f"check it in {manual}",
+        )
+    if value == 1:
+        return Check("BitLocker", "ok", "protection is on for the drive that holds your library")
+    if keystore.library_state(settings.data_dir) == "encrypted":
+        return Check(
+            "BitLocker",
+            "ok",
+            f"Windows does not report protection as on (it said {value}), but your library is "
+            "encrypted by Reyleight itself",
+        )
+    return Check(
+        "BitLocker",
+        "warn",
+        f"Windows does not report BitLocker protection as on for the drive that holds your "
+        f"library (it said {value}): whoever gets this computer could read your notes",
+        f"turn on device encryption or BitLocker ({manual}), or run "
+        "`python -m app encrypt-library` to encrypt the library itself",
+    )
+
+
+def _check_blocked_files() -> Check | None:
+    """Files of this program that Windows refused to load (Smart App Control), from its own log."""
+    if sys.platform != "win32":
+        return None
+    blocked = recent_blocked_files()
+    if blocked is None:
+        return Check(
+            "Blocked files",
+            "ok",
+            "could not read the Windows block log (Event Viewer > Applications and Services > "
+            "Microsoft > Windows > CodeIntegrity > Operational)",
+        )
+    if not blocked:
+        return Check(
+            "Blocked files",
+            "ok",
+            f"Windows has not blocked any file of this program in the last {LOOKBACK_DAYS} days",
+        )
+    latest = max(b.last_seen for b in blocked).astimezone().strftime("%Y-%m-%d %H:%M")
+    return Check(
+        "Blocked files",
+        "warn",
+        f"Windows blocked {len(blocked)} file(s) of this program in the last {LOOKBACK_DAYS} days "
+        f"(most recent {latest}): {summarise(blocked)}",
+        "Smart App Control blocks compiled files it has not seen before. Install the exact tested "
+        "versions (`pip install -r requirements.lock`) and try again, or see the README "
+        "troubleshooting. Reyleight never changes Windows security settings.",
     )
 
 
@@ -515,6 +601,9 @@ def run_doctor(
         "Windows Smart App Control", lambda: [c for c in [_check_windows_protection()] if c]
     )
     results += protection
+    results += _guarded("BitLocker", lambda: [c for c in [_check_bitlocker(settings)] if c])
+    results += _guarded("Blocked files", lambda: [c for c in [_check_blocked_files()] if c])
+    results += _guarded("scikit-learn", lambda: [c for c in [_check_scikit_learn()] if c])
     return results
 
 

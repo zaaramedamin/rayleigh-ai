@@ -34,6 +34,17 @@ def _open_access() -> Iterator[None]:
     app.dependency_overrides.pop(require_access, None)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_windows_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The doctor must not start PowerShell, read the Windows event log or import scikit-learn in a
+    new process during ordinary tests; those are tested on their own with scripted answers."""
+    import app.operations.doctor as doctor
+
+    monkeypatch.setattr(doctor, "bitlocker_protection", lambda _path: None)
+    monkeypatch.setattr(doctor, "recent_blocked_files", lambda *_a, **_k: [])
+    monkeypatch.setattr(doctor, "scikit_learn_loads", lambda: True)
+
+
 def _make_test_clients_local() -> None:
     """The API only answers to this computer's own address, so the tests' client says it is one.
 

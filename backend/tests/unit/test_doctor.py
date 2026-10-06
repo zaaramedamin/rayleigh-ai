@@ -1,5 +1,7 @@
 import sqlite3
+import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ from app.knowledge.chunking.service import chunk_document
 from app.knowledge.components import vector_store_path
 from app.knowledge.indexing.service import index_pending
 from app.operations.doctor import Check, format_checks, run_doctor
+from app.operations.windows import BlockedFile
 from app.storage.database import DB_FILENAME, create_db_engine
 from app.storage.files import save_file
 from app.storage.vector_store import QdrantVectorStore, collection_name
@@ -74,7 +77,7 @@ def test_a_healthy_plaintext_library_only_warns_that_it_is_not_encrypted(
 ) -> None:
     checks = by_name(run_doctor(make_settings(allowed_folders=[notes])))
 
-    assert {name: c.status for name, c in checks.items()} == {
+    expected = {
         "database": "ok",
         "encryption": "warn",
         "stored files": "ok",
@@ -85,7 +88,11 @@ def test_a_healthy_plaintext_library_only_warns_that_it_is_not_encrypted(
         "disk space": "ok",
         "embedding model": "ok",
         "local LLM": "ok",
+        "scikit-learn": "ok",
     }
+    if sys.platform == "win32":  # questions that only Windows can answer
+        expected |= {"BitLocker": "ok", "Blocked files": "ok"}
+    assert {name: c.status for name, c in checks.items()} == expected
     assert "checksums verified" in checks["stored files"].message
 
 
@@ -529,3 +536,114 @@ def test_older_versions_are_reported_as_history_not_as_a_problem(
 
     assert checks["library"].status == "ok"
     assert "1 current document(s), 1 older version(s) kept as history" in checks["library"].message
+
+
+# --- what Windows says: BitLocker, blocked files, scikit-learn ---------------------------------
+
+on_windows = pytest.mark.skipif(sys.platform != "win32", reason="these questions are about Windows")
+
+
+@on_windows
+def test_bitlocker_on_is_reported_as_fine(
+    healthy: Path, make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "bitlocker_protection", lambda _p: 1)
+
+    check = by_name(run_doctor(make_settings()))["BitLocker"]
+
+    assert check.status == "ok" and "is on" in check.message
+
+
+@on_windows
+def test_a_drive_that_is_not_protected_is_a_warning_with_both_ways_to_fix_it(
+    healthy: Path, make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "bitlocker_protection", lambda _p: 0)
+
+    check = by_name(run_doctor(make_settings()))["BitLocker"]
+
+    assert check.status == "warn" and "it said 0" in check.message
+    assert check.fix is not None
+    assert "BitLocker" in check.fix and "encrypt-library" in check.fix and "manage-bde" in check.fix
+
+
+@on_windows
+def test_an_unprotected_drive_is_fine_when_the_library_is_encrypted_by_reyleight_itself(
+    healthy: Path, make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "bitlocker_protection", lambda _p: 2)
+    monkeypatch.setattr(doctor.keystore, "library_state", lambda _d: "encrypted")
+
+    check = by_name(run_doctor(make_settings()))["BitLocker"]
+
+    assert check.status == "ok" and "encrypted by Reyleight itself" in check.message
+
+
+@on_windows
+def test_a_drive_windows_cannot_be_asked_about_is_not_a_problem_and_says_how_to_check(
+    healthy: Path, make_settings: MakeSettings
+) -> None:
+    check = by_name(run_doctor(make_settings()))["BitLocker"]  # the default test answer is None
+
+    assert (
+        check.status == "ok" and "could not ask" in check.message and "manage-bde" in check.message
+    )
+
+
+@on_windows
+def test_files_windows_blocked_are_listed_with_what_to_do(
+    healthy: Path, make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    when = datetime(2026, 10, 5, 22, 32, tzinfo=UTC)
+    blocked = [BlockedFile("scipy\\fft\\x.pyd", 3, when), BlockedFile("sklearn\\y.pyd", 1, when)]
+    monkeypatch.setattr(doctor, "recent_blocked_files", lambda *_a, **_k: blocked)
+
+    check = by_name(run_doctor(make_settings()))["Blocked files"]
+
+    assert check.status == "warn"
+    assert "2 file(s)" in check.message and "scipy\\fft\\x.pyd (3 times)" in check.message
+    assert check.fix is not None and "requirements.lock" in check.fix
+    assert "never changes Windows security settings" in check.fix
+
+
+@on_windows
+def test_no_blocked_files_and_an_unreadable_log_are_both_fine(
+    healthy: Path, make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    none_blocked = by_name(run_doctor(make_settings()))["Blocked files"]
+    monkeypatch.setattr(doctor, "recent_blocked_files", lambda *_a, **_k: None)
+    unreadable = by_name(run_doctor(make_settings()))["Blocked files"]
+
+    assert none_blocked.status == "ok" and "has not blocked any file" in none_blocked.message
+    assert unreadable.status == "ok" and "could not read" in unreadable.message
+
+
+def test_the_scikit_learn_placeholder_is_explained_when_it_is_needed(
+    healthy: Path, make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loads = by_name(run_doctor(make_settings()))["scikit-learn"]
+    monkeypatch.setattr(doctor, "scikit_learn_loads", lambda: False)
+    blocked = by_name(run_doctor(make_settings()))["scikit-learn"]
+    monkeypatch.setattr(doctor, "scikit_learn_loads", lambda: None)
+    unknown = by_name(run_doctor(make_settings()))
+
+    assert loads.status == "ok" and "loads normally" in loads.message
+    assert blocked.status == "ok" and "placeholder" in blocked.message
+    assert "does not affect embeddings" in blocked.message
+    assert "scikit-learn" not in unknown  # nothing to say when it could not be asked
+
+
+def test_a_failing_windows_question_cannot_stop_the_doctor(
+    healthy: Path, make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*_a: object, **_k: object) -> None:
+        raise OSError("event log service stopped")
+
+    monkeypatch.setattr(doctor, "recent_blocked_files", explode)
+
+    checks = by_name(run_doctor(make_settings()))
+
+    if sys.platform == "win32":
+        blocked = checks["Blocked files"]
+        assert blocked.status == "fail" and "OSError" in blocked.message
+    assert checks["local LLM"].status == "ok"
