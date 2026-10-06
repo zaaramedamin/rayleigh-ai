@@ -240,7 +240,8 @@ def test_serve_listens_on_this_computer_only_by_default(
 
     (args, kwargs) = uvicorn_calls.calls[0]
     assert args == ("app.main:app",)
-    assert kwargs == {"host": host, "port": 8123, "log_config": None}
+    # No per-request log lines: they would carry each request's query string (a folder path).
+    assert kwargs == {"host": host, "port": 8123, "log_config": None, "access_log": False}
     out = capsys.readouterr().out
     assert f"http://{host}:8123/" in out
 

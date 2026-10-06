@@ -346,7 +346,9 @@ def _cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
     import uvicorn
 
     print(f"Reyleight is starting at http://{args.host}:{args.port}/ (Ctrl+C to stop)")
-    uvicorn.run("app.main:app", host=args.host, port=args.port, log_config=None)
+    # No per-request log lines: they would carry the query string of each request (a folder path,
+    # for one). The application logs what it does, in counts and kinds, never text.
+    uvicorn.run("app.main:app", host=args.host, port=args.port, log_config=None, access_log=False)
     return 0
 
 
