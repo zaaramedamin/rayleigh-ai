@@ -246,3 +246,150 @@
 :root[data-motion="reduced"] .scan {
   display: none;
 }
+
+/* ---------- start-up and opening sequence ---------- */
+.reactor {
+  display: block;
+}
+.reactor-slot {
+  width: 170px;
+  height: 170px;
+}
+.reactor-slot--hidden {
+  visibility: hidden;
+}
+.reactor-slot:not(.reactor-slot--hidden) {
+  animation: fade-in 0.4s ease-out;
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* The start-up reactor turns at a steady, visible pace. */
+.reactor[data-state="boot"] .reactor-ring--outer {
+  --spin: 16s;
+}
+.reactor[data-state="boot"] .reactor-ring--ticks {
+  --spin: 34s;
+}
+.reactor[data-state="boot"] .reactor-ring--coil {
+  --spin: 9s;
+}
+.reactor[data-state="boot"] .reactor-ring--core {
+  --spin: 6s;
+}
+.reactor[data-state="boot"] .reactor-core {
+  animation-duration: 2.4s;
+}
+
+.boot-reactor {
+  animation: reactor-appear 1.4s ease-out both;
+  transition: opacity 0.35s ease-out;
+}
+.boot-reactor--settled {
+  opacity: 0;
+}
+@keyframes reactor-appear {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+}
+
+/* The notes under the logo arrive slowly, one after another. */
+.boot-title {
+  animation: note-in 1.4s 0.5s ease-out both;
+}
+.boot-line {
+  animation: note-in 1.2s ease-out both;
+}
+@keyframes note-in {
+  from {
+    opacity: 0;
+    filter: blur(8px);
+    transform: translateY(8px);
+  }
+}
+.boot-fade {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  transition: opacity 0.6s ease-in;
+}
+.boot--leaving .boot-fade {
+  opacity: 0;
+}
+
+/* The interface slides into place around the flying reactor. The side panel is revealed with a
+   clip instead of a move so the landing spot can be measured while it animates. */
+.shell--enter .topbar {
+  animation: enter-down 0.8s 0.2s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.shell--enter .nav {
+  animation: enter-left 0.8s 0.35s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.shell--enter .main {
+  animation: enter-up 0.9s 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.shell--enter .side {
+  animation: wipe-in 0.9s 0.4s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes enter-down {
+  from {
+    opacity: 0;
+    transform: translateY(-24px);
+  }
+}
+@keyframes enter-left {
+  from {
+    opacity: 0;
+    transform: translateX(-36px);
+  }
+}
+@keyframes enter-up {
+  from {
+    opacity: 0;
+    transform: translateY(36px);
+  }
+}
+@keyframes wipe-in {
+  from {
+    opacity: 0;
+    clip-path: inset(0 0 0 100%);
+  }
+}
+
+/* A status row switching from OFFLINE to what the backend reports. */
+.flip {
+  animation: flip-in 0.55s ease-out both;
+}
+@keyframes flip-in {
+  0% {
+    opacity: 0;
+    filter: blur(3px) brightness(2);
+    transform: translateY(-5px);
+  }
+  40% {
+    opacity: 0.4;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/* The reactor follows the conversation: fast and bright while listening, a slow pulse while talking. */
+.reactor[data-state="listening"] .reactor-ring {
+  animation-duration: 3s;
+}
+.reactor[data-state="listening"] .reactor-core {
+  animation-duration: 0.6s;
+}
+.reactor[data-state="speaking"] .reactor-core {
+  animation-duration: 0.7s;
+}
+.reactor[data-state="speaking"] .reactor-halo {
+  animation-duration: 1.2s;
+}

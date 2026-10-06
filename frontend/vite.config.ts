@@ -6,7 +6,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [react()],
   // Fonts stay real files so the strict CSP (font-src self) holds.
-  build: { assetsInlineLimit: 0 },
+  // The world map (about 750 KB of country borders) loads on demand as its own file.
+  build: { assetsInlineLimit: 0, chunkSizeWarningLimit: 900 },
   server: {
     host: "127.0.0.1",
     port: 5173,

@@ -1,6 +1,6 @@
 import { useId } from "react";
 
-export type ReactorState = "idle" | "thinking" | "offline";
+export type ReactorState = "idle" | "boot" | "thinking" | "listening" | "speaking" | "offline";
 
 interface Props {
   state?: ReactorState;

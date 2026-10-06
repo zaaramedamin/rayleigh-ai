@@ -2,11 +2,13 @@ import { HudFrame } from "../components/HudFrame";
 
 // These restate docs/security.md. They describe how the backend is built, not live measurements.
 const RULES: Array<[string, string]> = [
+  ["Access password", "The app and its API need your password. Only a salted hash is stored. It guards access to the application; it does not by itself encrypt your files on disk."],
   ["Local only", "Embeddings and answers are produced on this machine. No note or question is sent to a cloud API."],
   ["Loopback network", "The API listens on 127.0.0.1 and the model server address must be on this machine."],
   ["Allow-listed folders", "Only folders you chose are indexed. The app never widens that list on its own."],
   ["Notes are data", "Retrieved text is never treated as instructions, and the model has no tools to act with."],
   ["Honest sources", "Citations are built by the app from its database. Invented source numbers are discarded."],
+  ["General chat", "With MY NOTES off, the local model answers from what it knows and your notes are not read. Those replies are labelled GENERAL, have no sources and can be wrong."],
   ["No content in logs", "Questions, notes and answers are never written to logs."],
 ];
 

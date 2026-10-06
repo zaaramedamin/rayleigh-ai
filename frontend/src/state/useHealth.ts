@@ -7,9 +7,15 @@ export type Link =
   | { state: "offline" };
 
 /** Polls /health so the interface always shows whether the backend is really there. */
-export function useHealth(api: Api, intervalMs = 10_000): { link: Link; recheck: () => void } {
+const HISTORY_LENGTH = 30;
+
+export function useHealth(
+  api: Api,
+  intervalMs = 10_000,
+): { link: Link; recheck: () => void; history: Array<number | null> } {
   const [link, setLink] = useState<Link>({ state: "checking" });
   const [tick, setTick] = useState(0);
+  const [history, setHistory] = useState<Array<number | null>>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -17,9 +23,14 @@ export function useHealth(api: Api, intervalMs = 10_000): { link: Link; recheck:
       const started = performance.now();
       try {
         const health = await api.health();
-        if (!cancelled) setLink({ state: "online", health, latencyMs: Math.round(performance.now() - started) });
+        const latencyMs = Math.round(performance.now() - started);
+        if (cancelled) return;
+        setLink({ state: "online", health, latencyMs });
+        setHistory((h) => [...h, latencyMs].slice(-HISTORY_LENGTH));
       } catch {
-        if (!cancelled) setLink({ state: "offline" });
+        if (cancelled) return;
+        setLink({ state: "offline" });
+        setHistory((h) => [...h, null].slice(-HISTORY_LENGTH));
       }
     };
     setLink({ state: "checking" });
@@ -31,5 +42,5 @@ export function useHealth(api: Api, intervalMs = 10_000): { link: Link; recheck:
     };
   }, [api, intervalMs, tick]);
 
-  return { link, recheck: () => setTick((t) => t + 1) };
+  return { link, recheck: () => setTick((t) => t + 1), history };
 }

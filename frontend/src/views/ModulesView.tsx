@@ -11,7 +11,8 @@ interface Module {
 const MODULES: Module[] = [
   { name: "Cited answers", phase: "MVP", summary: "Ask your notes, get sources or an honest 'I don't know'.", state: "live" },
   { name: "Semantic search", phase: "MVP", summary: "Find passages by meaning, with file and line provenance.", state: "live" },
-  { name: "Library manager", phase: "Phase 1", summary: "Add folders, see every document, re-index, remove.", state: "next" },
+  { name: "Library manager", phase: "Phase 1", summary: "Add folders, see every document and its source, update the index, remove.", state: "live" },
+  { name: "Access password + profile", phase: "Phase 1", summary: "A password opens the app. A profile tells the assistant about you, as a note you control.", state: "live" },
   { name: "Streaming + chat memory", phase: "Phase 1", summary: "Token streaming, saved conversations, follow-up questions.", state: "next" },
   { name: "Better retrieval", phase: "Phase 2", summary: "Hybrid search, reranking, query rewriting, PDF and DOCX.", state: "planned" },
   { name: "Long-term memory", phase: "Phase 3", summary: "Facts and preferences you approve, viewable and deletable.", state: "planned" },
