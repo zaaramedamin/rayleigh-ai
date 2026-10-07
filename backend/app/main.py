@@ -20,6 +20,7 @@ from app.api.v1 import (
     profile,
     search,
     system,
+    tasks,
     voice,
 )
 from app.core.config import get_settings
@@ -45,6 +46,7 @@ def create_app() -> FastAPI:
         conversations.router,
         feedback.router,
         system.router,
+        tasks.router,
         library.router,
         profile.router,
         assistant.router,
