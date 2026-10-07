@@ -87,6 +87,7 @@ def test_a_healthy_plaintext_library_only_warns_that_it_is_not_encrypted(
         "allowed folders": "ok",
         "disk space": "ok",
         "embedding model": "ok",
+        "embedding library": "ok",
         "local LLM": "ok",
         "scikit-learn": "ok",
     }
@@ -647,3 +648,57 @@ def test_a_failing_windows_question_cannot_stop_the_doctor(
         blocked = checks["Blocked files"]
         assert blocked.status == "fail" and "OSError" in blocked.message
     assert checks["local LLM"].status == "ok"
+
+
+# --- the library that turns text into vectors --------------------------------------------------
+
+BLOCKED = (
+    "ImportError: DLL load failed while importing _C: An Application Control policy has "
+    "blocked this file."
+)
+
+
+def test_an_embedding_library_that_loads_is_ok(healthy: Path, make_settings: MakeSettings) -> None:
+    check = by_name(run_doctor(make_settings()))["embedding library"]
+
+    assert check.status == "ok" and "load" in check.message
+
+
+def test_a_library_blocked_by_windows_is_a_failure_that_says_what_still_works(
+    healthy: Path, make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "embedding_library_loads", lambda: (False, BLOCKED))
+
+    checks = by_name(run_doctor(make_settings()))
+    check = checks["embedding library"]
+
+    assert check.status == "fail" and BLOCKED in check.message
+    assert "cannot be searched, indexed or answered from" in check.message
+    assert check.fix is not None
+    assert (
+        "Smart App Control" in check.fix and "never changes Windows security settings" in check.fix
+    )
+    assert "MY NOTES off" in check.fix  # chat with the model alone does not need the library
+    assert checks["local LLM"].status == "ok"  # the rest of the report is unaffected
+
+
+def test_a_library_that_fails_for_another_reason_points_at_the_dependencies(
+    healthy: Path, make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        doctor, "embedding_library_loads", lambda: (False, "ModuleNotFoundError: torch")
+    )
+
+    check = by_name(run_doctor(make_settings()))["embedding library"]
+
+    assert check.status == "fail" and "ModuleNotFoundError: torch" in check.message
+    assert check.fix is not None and "requirements.lock" in check.fix
+    assert "Smart App Control" not in check.fix
+
+
+def test_a_library_that_could_not_be_asked_about_is_left_out_of_the_report(
+    healthy: Path, make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "embedding_library_loads", lambda: (None, ""))
+
+    assert "embedding library" not in by_name(run_doctor(make_settings()))

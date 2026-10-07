@@ -25,6 +25,7 @@ from app.knowledge.indexing.service import count_stale_vectors, library_counts
 from app.operations.windows import (
     LOOKBACK_DAYS,
     bitlocker_protection,
+    embedding_library_loads,
     recent_blocked_files,
     scikit_learn_loads,
     summarise,
@@ -204,6 +205,29 @@ def _check_windows_protection() -> Check | None:
         "ok",
         f"{state}: it can block newly installed compiled libraries "
         "(Reyleight already works around scikit-learn; see the README troubleshooting)",
+    )
+
+
+def _check_embedding_library() -> Check | None:
+    """Can the library that turns text into vectors be loaded? Without it, no search works."""
+    loads, reason = embedding_library_loads()
+    if loads is None:
+        return None
+    if loads:
+        return Check("embedding library", "ok", "PyTorch and sentence-transformers load")
+    blocked = "Application Control" in reason
+    return Check(
+        "embedding library",
+        "fail",
+        f"cannot be loaded, so notes cannot be searched, indexed or answered from: {reason}",
+        (
+            "Windows Smart App Control is refusing a library file (see Blocked files). Nothing in "
+            "Reyleight can override it, and Reyleight never changes Windows security settings; "
+            "trying again later while online sometimes clears it. Chat with the model alone "
+            "(MY NOTES off) still works."
+            if blocked
+            else "reinstall the dependencies: `pip install -r requirements.lock`"
+        ),
     )
 
 
@@ -596,6 +620,7 @@ def run_doctor(
     results += _guarded("settings", lambda: _check_settings(settings))
     results += _guarded("disk space", lambda: [_check_disk(settings)])
     results += _guarded("embedding model", lambda: [_check_model(settings)])
+    results += _guarded("embedding library", lambda: [c for c in [_check_embedding_library()] if c])
     results += _guarded("local LLM", lambda: [_check_llm(settings)])
     protection = _guarded(
         "Windows Smart App Control", lambda: [c for c in [_check_windows_protection()] if c]

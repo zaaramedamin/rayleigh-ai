@@ -43,6 +43,7 @@ def _no_real_windows_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor, "bitlocker_protection", lambda _path: None)
     monkeypatch.setattr(doctor, "recent_blocked_files", lambda *_a, **_k: [])
     monkeypatch.setattr(doctor, "scikit_learn_loads", lambda: True)
+    monkeypatch.setattr(doctor, "embedding_library_loads", lambda: (True, ""))
 
 
 def _make_test_clients_local() -> None:
