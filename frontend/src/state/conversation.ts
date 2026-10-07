@@ -6,6 +6,8 @@ import type {
   ChatMode,
   ChatResponse,
   ChatTurn,
+  FeedbackKind,
+  NewFeedback,
   NewStoredMessage,
   StoredMessage,
 } from "../api/types";
@@ -130,4 +132,40 @@ export function restoreMessages(stored: StoredMessage[], firstId: number): Messa
     }
   }
   return messages;
+}
+
+// --- marks on answers -------------------------------------------------------------------------------
+
+/**
+ * The mark to keep for an answer: the question, the answer that was given and what the interface knew
+ * about it. The sources are named (file, heading, number) but their text is not copied, because the
+ * point is to review where the answer went wrong, not to keep a second copy of the notes.
+ * Null for anything that is not an answer or a reply.
+ */
+export function feedbackFor(message: MessageState, kind: FeedbackKind): NewFeedback | null {
+  if (message.kind === "reply") {
+    const { model, truncated } = message.response;
+    return {
+      kind,
+      mode: "general",
+      question: message.question,
+      answer: message.response.answer,
+      details: { model, truncated },
+    };
+  }
+  if (message.kind !== "answer") return null;
+  const { sources, reason, grounded, notes_considered, searched_for } = message.response;
+  return {
+    kind,
+    mode: "notes",
+    question: message.question,
+    answer: message.response.answer,
+    details: {
+      sources: sources.map((s) => ({ document_id: s.document_id, source: s.source, heading_path: s.heading_path })),
+      reason,
+      grounded,
+      notes_considered,
+      searched_for: searched_for ?? null,
+    },
+  };
 }

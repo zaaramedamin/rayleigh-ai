@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AskResponse, NewStoredMessage, StoredMessage } from "../api/types";
-import { MAX_CHARS, historyFor, restoreMessages, storedTurns } from "./conversation";
+import { MAX_CHARS, feedbackFor, historyFor, restoreMessages, storedTurns } from "./conversation";
 import type { MessageState } from "./useAssistant";
 
 const grounded: AskResponse = {
@@ -230,5 +230,85 @@ describe("saving and reopening", () => {
       actions: [{ name: "open_page", page: "settings" }],
     });
     expect(restored[3]).toMatchObject({ kind: "reply", response: { model: "", actions: [] }, actions: [] });
+  });
+});
+
+describe("feedbackFor", () => {
+  const source = {
+    marker: 1,
+    citation_id: "4:0",
+    document_id: 4,
+    chunk_index: 0,
+    score: 0.8,
+    source: "rice.txt",
+    heading_path: "Rice > Cooking",
+    start_line: 1,
+    end_line: 3,
+    text: "Rice needs eighteen minutes: a private sentence from the notes.",
+  };
+  const cited: AskResponse = {
+    answer: "Rice needs eighteen minutes [1].",
+    grounded: true,
+    reason: "answered",
+    sources: [source],
+    notes_considered: 3,
+    searched_for: "How long does rice cook?",
+  };
+
+  it("keeps the question, the answer and where it came from, for an answer from the notes", () => {
+    const message: MessageState = { kind: "answer", id: 2, question: "How long do oats simmer?", response: cited, ms: 900 };
+
+    expect(feedbackFor(message, "wrong_source")).toEqual({
+      kind: "wrong_source",
+      mode: "notes",
+      question: "How long do oats simmer?",
+      answer: "Rice needs eighteen minutes [1].",
+      details: {
+        sources: [{ document_id: 4, source: "rice.txt", heading_path: "Rice > Cooking" }],
+        reason: "answered",
+        grounded: true,
+        notes_considered: 3,
+        searched_for: "How long does rice cook?",
+      },
+    });
+  });
+
+  it("names the sources but does not copy the text of the notes", () => {
+    const message: MessageState = { kind: "answer", id: 2, question: "q", response: cited, ms: 1 };
+
+    expect(JSON.stringify(feedbackFor(message, "not_helpful"))).not.toContain("private sentence");
+  });
+
+  it("marks a refusal with the reason it gave, and no sources", () => {
+    const refusal: AskResponse = {
+      answer: "I don't have enough information in your notes to answer that.",
+      grounded: false,
+      reason: "no_relevant_notes",
+      sources: [],
+      notes_considered: 0,
+    };
+
+    const entry = feedbackFor({ kind: "answer", id: 2, question: "q", response: refusal, ms: 1 }, "missing_info");
+
+    expect(entry?.details).toMatchObject({ sources: [], reason: "no_relevant_notes", grounded: false, searched_for: null });
+  });
+
+  it("marks a general reply by the model that wrote it", () => {
+    const response = { answer: "Paris.", model: "qwen3.5:4b", truncated: false };
+
+    expect(feedbackFor({ kind: "reply", id: 2, question: "Capital of France?", response, ms: 900 }, "helpful")).toEqual({
+      kind: "helpful",
+      mode: "general",
+      question: "Capital of France?",
+      answer: "Paris.",
+      details: { model: "qwen3.5:4b", truncated: false },
+    });
+  });
+
+  it("has nothing to mark in a message that is not an answer", () => {
+    expect(feedbackFor({ kind: "user", id: 1, text: "hi" }, "helpful")).toBeNull();
+    expect(feedbackFor({ kind: "note", id: 1, text: "status" }, "helpful")).toBeNull();
+    expect(feedbackFor({ kind: "pending", id: 1, mode: "notes" }, "helpful")).toBeNull();
+    expect(feedbackFor({ kind: "error", id: 1, error: new Error("down") }, "helpful")).toBeNull();
   });
 });
