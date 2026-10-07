@@ -10,6 +10,7 @@ Summarizing and comparing read the documents themselves, so they need no search 
 state the search index is in.
 """
 
+import json
 import logging
 import re
 import secrets
@@ -21,8 +22,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai.llm.base import LLMProvider
-from app.knowledge.answering.prompts import COMBINE, COMPARE, SUMMARIZE
-from app.knowledge.answering.service import MAX_CONTEXT_CHARS, resolve_markers
+from app.knowledge.answering.prompts import COMBINE, COMPARE, EXTRACT, SUMMARIZE
+from app.knowledge.answering.service import (
+    MAX_CONTEXT_CHARS,
+    Source,
+    format_notes,
+    resolve_markers,
+    select_context,
+)
+from app.knowledge.retrieval.service import RetrievedChunk
 from app.storage.models import DOC_ACTIVE, Chunk, Document
 
 logger = logging.getLogger(__name__)
@@ -290,3 +298,129 @@ def compare(llm: LLMProvider, documents: Sequence[DocumentText]) -> Comparison:
         sources=tuple(entry for entry in numbered if entry.marker in cited),
         truncated=tuple(truncated),
     )
+
+
+# --- extracting a table of facts -----------------------------------------------------------------
+
+MAX_ROWS = 100
+MAX_ITEM_CHARS = 200
+MAX_VALUE_CHARS = 500
+
+ExtractReason = Literal[
+    "extracted", "no_relevant_notes", "nothing_found", "unreadable", "no_valid_row"
+]
+
+_FENCE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
+
+
+@dataclass(frozen=True)
+class ExtractedRow:
+    item: str  # what the fact is about
+    value: str  # the fact, as the note says it
+    marker: int  # the number of the note it comes from, which the application checked
+
+
+@dataclass(frozen=True)
+class Extraction:
+    rows: tuple[ExtractedRow, ...]
+    sources: tuple[Source, ...]  # the notes the rows come from, built from the database
+    reason: ExtractReason
+    notes_considered: int
+    dropped: int  # rows the model wrote that were not usable: no such note, or not a fact
+
+
+def parse_rows(reply: str) -> list[object] | None:
+    """The JSON array in a reply, or None if there is no readable one. A code fence around the array
+    and a few words before or after it are tolerated, because small models add them."""
+    text = _FENCE.sub("", reply.strip()).strip()
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end < start:
+        return None
+    try:
+        data = json.loads(text[start : end + 1])
+    except ValueError:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _row(entry: object, note_count: int) -> ExtractedRow | None:
+    """One usable row, or None. The note number must be a real integer that exists."""
+    if not isinstance(entry, dict):
+        return None
+    item, value, note = entry.get("item"), entry.get("value"), entry.get("note")
+    if not isinstance(item, str) or not isinstance(value, str):
+        return None
+    if isinstance(note, bool) or not isinstance(note, int) or not 1 <= note <= note_count:
+        return None
+    item, value = " ".join(item.split()), " ".join(value.split())
+    if not item or not value or len(item) > MAX_ITEM_CHARS or len(value) > MAX_VALUE_CHARS:
+        return None
+    return ExtractedRow(item, value, note)
+
+
+def extract(
+    llm: LLMProvider, request: str, retrieved: Sequence[RetrievedChunk], min_score: float
+) -> Extraction:
+    """A table of the facts the notes hold that match `request`.
+
+    The notes are chosen exactly as for an answer (relevant enough, within the reading budget). The
+    model must reply with a JSON array; the application reads it strictly, drops every row that does
+    not name a real note or is not a short fact, and builds the list of sources itself from the
+    notes. Raises ValueError for an empty request.
+    """
+    wanted = request.strip()
+    if not wanted:
+        raise ValueError("say which facts to extract")
+    notes = select_context(retrieved, min_score)
+    if not notes:
+        logger.info("extraction finished reason=no_relevant_notes")
+        return Extraction((), (), "no_relevant_notes", 0, 0)
+
+    nonce = secrets.token_hex(8)
+    user = f"{format_notes(notes, nonce)}\n\nRequest: {wanted}"
+    entries = parse_rows(llm.generate(EXTRACT.system, user))
+
+    def result(
+        reason: ExtractReason, rows: tuple[ExtractedRow, ...] = (), dropped: int = 0
+    ) -> Extraction:
+        cited = {row.marker for row in rows}
+        sources = tuple(
+            Source(
+                marker=number,
+                citation_id=note.citation_id,
+                document_id=note.document_id,
+                chunk_index=note.chunk_index,
+                source=note.source,
+                heading_path=note.heading_path,
+                start_line=note.start_line,
+                end_line=note.end_line,
+                score=note.score,
+                text=note.text,
+                start_page=note.start_page,
+                end_page=note.end_page,
+            )
+            for number, note in enumerate(notes, start=1)
+            if number in cited
+        )
+        logger.info(
+            "extraction finished reason=%s rows=%d dropped=%d notes=%d",
+            reason,
+            len(rows),
+            dropped,
+            len(notes),
+        )
+        return Extraction(rows, sources, reason, len(notes), dropped)
+
+    if entries is None:
+        return result("unreadable")
+    if not entries:
+        return result("nothing_found")
+    rows: list[ExtractedRow] = []
+    for entry in entries[: MAX_ROWS * 2]:
+        row = _row(entry, len(notes))
+        if row is not None and row not in rows and len(rows) < MAX_ROWS:
+            rows.append(row)
+    dropped = len(entries) - len(rows)
+    if not rows:
+        return result("no_valid_row", dropped=dropped)
+    return result("extracted", tuple(rows), dropped)

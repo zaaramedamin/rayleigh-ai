@@ -16,6 +16,7 @@ PINNED = {
     "summarize": (1, "52e3e2ad21"),
     "combine": (1, "b322afcb5b"),
     "compare": (1, "f2e9eb65a3"),
+    "extract": (1, "883487bed8"),
 }
 
 
