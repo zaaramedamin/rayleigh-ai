@@ -3,6 +3,7 @@ import type { AskReason, ChatMode } from "../api/types";
 import { actionLabel } from "../state/actions";
 import type { MessageState, useAssistant } from "../state/useAssistant";
 import { AnswerText } from "./AnswerText";
+import { FeedbackButtons } from "./FeedbackButtons";
 
 export type Assistant = ReturnType<typeof useAssistant>;
 
@@ -124,6 +125,7 @@ export function ChatBubble({ message, assistant, isLatest, onShowSources }: Prop
             {message.ms > 0 && <span>{(message.ms / 1000).toFixed(1)} s</span>}
             {response.truncated && <span className="warn">cut off at the length limit</span>}
           </footer>
+          <FeedbackButtons mark={message.mark?.kind} mode="general" onRate={(kind) => void assistant.rate(message.id, kind)} />
         </div>
       );
     }
@@ -174,6 +176,7 @@ export function ChatBubble({ message, assistant, isLatest, onShowSources }: Prop
               </button>
             )}
           </footer>
+          <FeedbackButtons mark={message.mark?.kind} mode="notes" onRate={(kind) => void assistant.rate(message.id, kind)} />
         </div>
       );
     }

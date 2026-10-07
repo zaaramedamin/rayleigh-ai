@@ -4,12 +4,18 @@ import { ApiError, isAbort } from "../api/client";
 import { sound } from "../audio/sound";
 import { speech } from "../audio/speech";
 import { events } from "./events";
-import type { Api, AskResponse, ChatMode, ChatResponse, ChatTurn } from "../api/types";
+import type { Api, AskResponse, ChatMode, ChatResponse, ChatTurn, FeedbackKind } from "../api/types";
 import { parseActions } from "./actions";
 import type { AppAction, AppControls } from "./actions";
-import { historyFor, restoreMessages, storedTurns } from "./conversation";
+import { feedbackFor, historyFor, restoreMessages, storedTurns } from "./conversation";
 import { addressed } from "./greeting";
 import { useSettings } from "./settings";
+
+/** The mark the owner put on an answer: its number on the server, and what it says. */
+export interface Mark {
+  id: number;
+  kind: FeedbackKind;
+}
 
 // "answer" comes from the notes (cited, or an explicit refusal). "reply" is general chat: the
 // model alone, no notes and no sources; `actions` is what it did in the application. "note" is
@@ -26,8 +32,16 @@ export type MessageState =
       /** The text written so far. Not checked yet: citations are only verified when it is complete. */
       partial?: string;
     }
-  | { kind: "answer"; id: number; question: string; response: AskResponse; ms: number }
-  | { kind: "reply"; id: number; question: string; response: ChatResponse; ms: number; actions?: AppAction[] }
+  | { kind: "answer"; id: number; question: string; response: AskResponse; ms: number; mark?: Mark }
+  | {
+      kind: "reply";
+      id: number;
+      question: string;
+      response: ChatResponse;
+      ms: number;
+      actions?: AppAction[];
+      mark?: Mark;
+    }
   | { kind: "note"; id: number; text: string }
   | { kind: "error"; id: number; error: ApiError | Error };
 
@@ -361,6 +375,46 @@ export function useAssistant(
     [api],
   );
 
+  /**
+   * Mark an answer. The first mark is kept; another kind changes it; the same kind again takes it
+   * back. A mark keeps the question and the answer on this computer, which is why it is only made
+   * when pressed, whatever the SAVE switch says about conversations.
+   */
+  const rating = useRef(new Set<number>());
+  const rate = useCallback(
+    async (id: number, kind: FeedbackKind) => {
+      const message = messagesRef.current.find((m) => m.id === id);
+      if (!message || (message.kind !== "answer" && message.kind !== "reply")) return;
+      if (rating.current.has(id)) return; // one request at a time for one answer
+      rating.current.add(id);
+      const show = (mark: Mark | undefined) =>
+        setMessages((all) =>
+          all.map((x) => (x.id === id && (x.kind === "answer" || x.kind === "reply") ? { ...x, mark } : x)),
+        );
+      try {
+        const current = message.mark;
+        if (current && current.kind === kind) {
+          await api.deleteFeedback(current.id);
+          show(undefined);
+        } else if (current) {
+          const changed = await api.changeFeedback(current.id, kind);
+          show({ id: changed.id, kind: changed.kind });
+        } else {
+          const entry = feedbackFor(message, kind);
+          if (!entry) return;
+          const created = await api.addFeedback(entry);
+          show({ id: created.id, kind: created.kind });
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : undefined;
+        events.notify("error", "YOUR MARK WAS NOT SAVED", { detail });
+      } finally {
+        rating.current.delete(id);
+      }
+    },
+    [api],
+  );
+
   /** End the answer that is being written. What was streamed so far is dropped. */
   const stop = useCallback(() => stream.current?.abort(), []);
 
@@ -380,6 +434,7 @@ export function useAssistant(
     clear,
     open,
     stop,
+    rate,
     /** A cited answer is being written, so it can be stopped. */
     canStop: status === "thinking" && messages.some((m) => m.kind === "pending" && m.mode === "notes"),
     select,

@@ -1831,3 +1831,32 @@
 .convlist input {
   width: 100%;
 }
+
+/* ---------- marks on answers ---------- */
+.feedback {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.feedback-btn {
+  padding: 2px 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.feedback-btn:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+.feedback-btn--on {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: var(--primary-dim);
+}
