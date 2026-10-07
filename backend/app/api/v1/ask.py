@@ -88,7 +88,7 @@ class AskResponse(BaseModel):
     )
 
 
-def _llm_status(exc: LLMError) -> int:
+def llm_status(exc: LLMError) -> int:
     """The HTTP status for a model failure: slow, not there, or something else."""
     if isinstance(exc, LLMTimeoutError):
         return status.HTTP_504_GATEWAY_TIMEOUT
@@ -152,7 +152,7 @@ def ask(
     except KeywordSearchUnavailable as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     except LLMError as exc:
-        raise HTTPException(_llm_status(exc), str(exc)) from exc
+        raise HTTPException(llm_status(exc), str(exc)) from exc
     return _response(answer, rewrite)
 
 
@@ -175,7 +175,7 @@ async def _events(
             else:
                 yield _event("done", _response(item.answer, rewrite).model_dump())
     except LLMError as exc:
-        yield _event("error", {"status": _llm_status(exc), "detail": str(exc)})
+        yield _event("error", {"status": llm_status(exc), "detail": str(exc)})
     except Exception as exc:
         # What went wrong can hold pieces of a note or a question: only its kind is logged.
         logger.error("streamed answer failed error=%s", type(exc).__name__)
