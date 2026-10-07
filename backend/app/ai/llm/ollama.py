@@ -19,13 +19,19 @@ from app.ai.llm.base import (
     ToolCall,
     ToolSpec,
 )
+from app.ai.llm.budget import (
+    CONTEXT_TOKENS,
+    REPLY_TOKENS,
+    THINKING_REPLY_TOKENS,
+    input_chars,
+)
 from app.core.config import validate_loopback_url
 
 logger = logging.getLogger(__name__)
 
 # Context window requested from Ollama, in tokens. The prompt builder keeps the notes under
 # 6000 characters, so the system prompt can never be pushed out of the window.
-DEFAULT_NUM_CTX = 8192
+DEFAULT_NUM_CTX = CONTEXT_TOKENS
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 # Fields a model may not support. Ollama names the feature in its refusal, and the request is
 # then sent again without that field: (field in the request, word in the refusal).
@@ -62,6 +68,16 @@ class OllamaProvider:
         self._num_ctx = num_ctx
         # No proxies (a proxy would see the prompt) and no redirects.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+    @property
+    def reply_tokens(self) -> int:
+        """The room kept free for the reply (the most the model may write)."""
+        return THINKING_REPLY_TOKENS if self._think else REPLY_TOKENS
+
+    @property
+    def input_chars(self) -> int:
+        """The most characters a prompt may hold so that the reply still fits in the window."""
+        return input_chars(self._num_ctx, self.reply_tokens)
 
     # --- HTTP ---------------------------------------------------------------------------------
 
@@ -171,7 +187,7 @@ class OllamaProvider:
             "options": {
                 "temperature": temperature,
                 "num_ctx": self._num_ctx,
-                "num_predict": 4096 if self._think else 1024,  # bound a runaway answer
+                "num_predict": self.reply_tokens,  # bound a runaway answer
             },
         }
         if tools:
