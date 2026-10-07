@@ -119,12 +119,14 @@ def build_prompt(question: str, notes: Sequence[RetrievedChunk], nonce: str) -> 
     return SYSTEM_PROMPT, user
 
 
-def resolve_citations(text: str, notes: Sequence[RetrievedChunk]) -> tuple[str, list[Source]]:
-    """Keep only citation numbers that refer to a provided note, and map them to sources.
+def resolve_markers(text: str, count: int) -> tuple[str, set[int]]:
+    """Keep only the citation numbers 1 to `count` in a model's text, and say which were used.
 
-    "[1, 2]" is normalised to "[1][2]". Numbers the model invented are removed.
+    "[1, 2]" is normalised to "[1][2]". Numbers the model invented, however it wrote them, are
+    removed. What the model says is never trusted for what a number stands for: the caller maps the
+    numbers that survive back to sources it holds itself.
     """
-    valid = range(1, len(notes) + 1)
+    valid = range(1, count + 1)
     cited: set[int] = set()
 
     def rewrite(match: re.Match[str]) -> str:
@@ -137,6 +139,15 @@ def resolve_citations(text: str, notes: Sequence[RetrievedChunk]) -> tuple[str, 
     cleaned = _REPEATED_MARKER.sub(r"\1", _CITATION_GROUP.sub(rewrite, text))
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned).strip()
+    return cleaned, cited
+
+
+def resolve_citations(text: str, notes: Sequence[RetrievedChunk]) -> tuple[str, list[Source]]:
+    """Keep only citation numbers that refer to a provided note, and map them to sources.
+
+    "[1, 2]" is normalised to "[1][2]". Numbers the model invented are removed.
+    """
+    cleaned, cited = resolve_markers(text, len(notes))
 
     sources = [
         Source(

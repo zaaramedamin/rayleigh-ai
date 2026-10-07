@@ -16,6 +16,7 @@ from app.knowledge.answering.service import (
     build_prompt,
     compose_answer,
     resolve_citations,
+    resolve_markers,
     select_context,
     stream_answer,
 )
@@ -482,3 +483,28 @@ def test_a_model_error_in_the_middle_surfaces_after_what_was_already_sent() -> N
 
     assert "Simmer the oats in milk [1].".startswith("".join(received))
     assert received  # something was shown before the error
+
+
+# --- resolve_markers: the number checking, shared with the other tasks ----------------------
+
+
+def test_only_the_numbers_up_to_the_count_survive_and_the_used_ones_are_reported() -> None:
+    text, cited = resolve_markers("A fact [1], another [3], and an invented one [7].", 3)
+
+    assert text == "A fact [1], another [3], and an invented one."
+    assert cited == {1, 3}
+
+
+def test_a_list_of_numbers_is_normalised_and_repeats_collapse() -> None:
+    assert resolve_markers("Both agree [1, 2].", 2) == ("Both agree [1][2].", {1, 2})
+    assert resolve_markers("Again [1][1][1].", 2) == ("Again [1].", {1})
+
+
+def test_numbers_that_cannot_be_valid_however_they_are_written_are_removed() -> None:
+    text, cited = resolve_markers("Odd [0] [-1] [99999999999999999999] [1].", 3)
+
+    assert cited == {1} and "[0]" not in text and "99999" not in text
+
+
+def test_with_nothing_to_cite_every_marker_goes() -> None:
+    assert resolve_markers("A claim [1] and [2].", 0) == ("A claim and.", set())
