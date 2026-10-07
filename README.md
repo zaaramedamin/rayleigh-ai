@@ -173,6 +173,8 @@ Sources:
 
 A document is given by its number or by its file name (`python -m app search` shows a document's number in the id of each result: id 7:0 is document 7).
 
+In the interface, **Knowledge > Library > INSPECT** on a document has a **SUMMARIZE** button. The summary is shown with a reminder that it has no sources, and a long document says how much of it was read. Comparisons and tables are not in the interface yet; use the command line or the API.
+
 - **summarize** reads one document from its own text, so it needs no search. A document too long for one reading is cut into parts, each part is summarized, and the partial summaries are combined; if it is longer than the first 8 parts (about 48,000 characters), the result says that only the start was read.
 - **compare** reads two to four documents and writes what they have in common and where they differ. The model cites documents by number, and the application checks every citation: a comparison that cites no document is withheld, as an answer without a valid citation is.
 - **extract** searches your notes like `ask`, then asks the model for the facts as a table of rows (what, the value, which note). The application reads the table strictly and drops every row that names a note it was not given or is not a short fact; the sources are built from the database. If no note is relevant enough, the model is not called.
