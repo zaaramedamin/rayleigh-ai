@@ -124,6 +124,7 @@ Answers are written by a model running in [Ollama](https://ollama.com) on this m
 - `OLLAMA_URL` must point at this machine (`localhost`, `127.0.0.1` or `::1`). Any other address is rejected at startup, so prompts built from your notes can never be sent to another computer.
 - Requests ignore system proxy settings and refuse redirects. The prompt and the model's answer are never logged.
 - Reasoning ("thinking") mode is off by default because it is far slower; set `LLM_THINK=true` to turn it on.
+- **The prompt always fits the model's memory.** The model reads about 8,000 tokens at a time, and Ollama silently drops the *start* of a prompt that is too long, which is where the instructions are. So Reyleight keeps every prompt inside that window itself, and decides what gives way first: the instructions and your latest message are never cut (a message too long to share the window with the instructions is refused with a sentence that says so), notes handed to the model have their own limit that always leaves room, and earlier turns of a conversation take what is left, oldest first. A conversation of hundreds of exchanges keeps working and the assistant still knows its name and how to address you. With `LLM_THINK=true` the model reserves more room for its reasoning, so the history gets shorter.
 
 ### Asking questions
 
