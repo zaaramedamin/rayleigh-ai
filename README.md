@@ -80,6 +80,9 @@ The `--constraint` matters: without it, `pip-compile` picks the newest version o
 | `status` | Show documents, chunks, how many are searchable, and any missing or replaced documents |
 | `search <question>` | Show the most relevant chunks, with scores and sources (`--top-k`, `--type .md`, `--document ID`) |
 | `ask <question>` | Answer a question from your notes, with citations (`--top-k`, `--type`, `--document`) |
+| `summarize <document>` | A short summary of one document, by number or file name |
+| `compare <document> <document> ...` | What two to four documents have in common and where they differ, with sources |
+| `extract <what you want>` | A table of the facts your notes hold that match a request, each with its source (`--top-k`, `--type`, `--document`, `--mode`) |
 | `check-llm` | Send a test prompt to the local LLM (Ollama) |
 | `eval` | Measure retrieval and answer quality on a built-in test set (`--answers`, `--chunk-size`, `--min-score`, `--output`) |
 | `offline-check` | Run the whole pipeline with all non-local network access blocked, and report any attempt |
@@ -150,6 +153,32 @@ How an answer is made, and why you can trust the sources:
 
 `reason` is one of `answered`, `no_relevant_notes`, `model_declined`, `no_valid_citation`. `ANSWER_MIN_SCORE` was checked with the evaluation set (see [Measuring quality](#measuring-quality)). A 4B-parameter local model can still make mistakes, so use the citations to check the answer against your note.
 
+### Summaries, comparisons and tables
+
+Three more things the assistant can do with your notes, from the command line or the API (`POST /api/v1/tasks/summarize`, `/compare` and `/extract`, behind the same access password as everything else):
+
+```powershell
+python -m app summarize lisbon-trip.md
+python -m app compare invoices-2025.md invoices-2026.md
+python -m app extract the serial number of each device
+```
+
+```
+  router   SN-7F3K-9921  [1]
+  printer  SN-2B8M-1146  [1]
+
+Sources:
+  [1] devices.md > Devices, lines 1-5  (id 7:0)
+```
+
+A document is given by its number or by its file name (`python -m app search` shows a document's number in the id of each result: id 7:0 is document 7).
+
+- **summarize** reads one document from its own text, so it needs no search. A document too long for one reading is cut into parts, each part is summarized, and the partial summaries are combined; if it is longer than the first 8 parts (about 48,000 characters), the result says that only the start was read.
+- **compare** reads two to four documents and writes what they have in common and where they differ. The model cites documents by number, and the application checks every citation: a comparison that cites no document is withheld, as an answer without a valid citation is.
+- **extract** searches your notes like `ask`, then asks the model for the facts as a table of rows (what, the value, which note). The application reads the table strictly and drops every row that names a note it was not given or is not a short fact; the sources are built from the database. If no note is relevant enough, the model is not called.
+
+All three work on the local model only, treat your notes as data and not as instructions, and are measured by `eval --answers` (see [Measuring quality](#measuring-quality)). Their instructions are kept in one place, `app/knowledge/answering/prompts.py`, each with a version and a fingerprint of its text: a test fails if a prompt changes without its version, and the evaluation report names the versions it ran with, so two reports can be compared knowing which prompts they used.
+
 ### General chat
 
 `POST /api/v1/chat` with `{"message": "...", "history": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}` talks to the local model directly. It answers from what the model knows and reads nothing from your library, so it works even when the library is empty or locked. The response has `answer`, `model`, and `truncated` (true when the reply hit the length limit). `history` is optional and holds the earlier turns, oldest first; only the recent ones that fit the model are used.
@@ -175,7 +204,7 @@ Spoken orders always go to the assistant, which searches your notes itself when 
 python -m app eval --answers
 ```
 
-Runs 37 questions with known answers (some answerable, some not, one with a hidden instruction) against 12 made-up notes, in a throwaway library that never touches your data. Measured on 2026-10-03: the right note ranked first for 27 of 27 questions, 24 of 26 answerable questions were answered correctly with a valid citation, 10 of 10 unanswerable ones were refused, and the hidden instruction was ignored. The two wrong answers were mistakes by the small model. Details, how to read the report and how to add your own questions: [docs/evaluation.md](docs/evaluation.md).
+Runs 37 questions with known answers (some answerable, some not, one with a hidden instruction) against 12 made-up notes, in a throwaway library that never touches your data. With `--answers` it also runs follow-up questions and five summarize, compare and extract jobs, and its report names the version of every prompt used. Measured on 2026-10-03: the right note ranked first for 27 of 27 questions, 24 of 26 answerable questions were answered correctly with a valid citation, 10 of 10 unanswerable ones were refused, and the hidden instruction was ignored. The two wrong answers were mistakes by the small model. Details, how to read the report and how to add your own questions: [docs/evaluation.md](docs/evaluation.md).
 
 To test **your own questions about your real notes**, make a folder with the same layout as `backend/eval/` (a `corpus/` folder of notes and a `questions.json`) and point `eval` at it:
 
