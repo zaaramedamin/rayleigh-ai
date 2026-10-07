@@ -18,15 +18,23 @@ from sqlalchemy.orm import Session
 
 from app.ai.embeddings.base import EmbeddingProvider
 from app.ai.llm.base import ChatMessage, LLMError, LLMProvider, Role
-from app.evaluation.dataset import Dataset, EvalQuestion, ExpectedSource
+from app.evaluation.dataset import Dataset, EvalQuestion, EvalTask, ExpectedSource
+from app.knowledge.answering.prompts import versions
 from app.knowledge.answering.rewrite import standalone_question
 from app.knowledge.answering.service import Answer, compose_answer
+from app.knowledge.answering.tasks import (
+    DocumentText,
+    compare,
+    extract,
+    load_document_text,
+    summarize,
+)
 from app.knowledge.indexing.service import index_pending
 from app.knowledge.ingestion.service import ingest_folders
 from app.knowledge.retrieval.keyword import KeywordSearchUnavailable
 from app.knowledge.retrieval.service import SEARCH_MODES, RetrievedChunk, SearchMode, retrieve
 from app.storage.database import Base, create_db_engine
-from app.storage.models import Chunk
+from app.storage.models import DOC_ACTIVE, Chunk, Document
 from app.storage.vector_store import QdrantVectorStore
 
 RETRIEVAL_CUTOFFS = (1, 3, 5)
@@ -75,6 +83,21 @@ class FollowUpOutcome:
 
 
 @dataclass
+class TaskOutcome:
+    """A summarize, compare or extract job, and what it produced."""
+
+    task: EvalTask
+    text: str  # the summary, the comparison, or the extracted rows as lines of "item: value"
+    cited: tuple[str, ...]  # file names of the notes the result cites (none for a summary)
+    problems: list[str]
+    seconds: float
+
+    @property
+    def passed(self) -> bool:
+        return not self.problems
+
+
+@dataclass
 class EvalRun:
     embedding_model: str
     llm_model: str | None
@@ -92,6 +115,10 @@ class EvalRun:
     mode: SearchMode = "vector"
     by_mode: dict[str, list[RetrievalOutcome]] = field(default_factory=dict)
     follow_ups: list[FollowUpOutcome] = field(default_factory=list)
+    tasks: list[TaskOutcome] = field(default_factory=list)
+    # The version and fingerprint of every prompt the answers were written with, so two
+    # reports can be told apart when a prompt changed between them.
+    prompts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -161,6 +188,22 @@ def check_answer(question: EvalQuestion, answer: Answer) -> list[str]:
     cited_files = {source.source for source in answer.sources}
     if not cited_files & expected_files:
         problems.append("cited the wrong note: " + ", ".join(sorted(cited_files)))
+    return problems
+
+
+def check_task(task: EvalTask, text: str, cited: Sequence[str]) -> list[str]:
+    """What is wrong with this result? An empty list means it is correct."""
+    problems: list[str] = []
+    lowered = text.lower()
+    for group in task.answer_contains:
+        if not any(phrase.lower() in lowered for phrase in group):
+            problems.append("result is missing: " + " / ".join(repr(p) for p in group))
+    for phrase in task.answer_must_not_contain:
+        if phrase.lower() in lowered:
+            problems.append(f"result contains forbidden text {phrase!r}")
+    missing = sorted(set(task.expected_sources) - set(cited))
+    if missing:
+        problems.append("did not cite: " + ", ".join(missing))
     return problems
 
 
@@ -349,6 +392,87 @@ def run_follow_ups(
     return outcomes
 
 
+def _document_text(corpus: PreparedCorpus, document_ids: dict[str, int], name: str) -> DocumentText:
+    document_id = document_ids.get(name)
+    if document_id is None:
+        raise LookupError(f"{name} is not in the library: it could not be ingested")
+    return load_document_text(corpus.session, document_id)
+
+
+def _run_task(
+    corpus: PreparedCorpus,
+    embedder: EmbeddingProvider,
+    llm: LLMProvider,
+    task: EvalTask,
+    document_ids: dict[str, int],
+    *,
+    top_k: int,
+    min_score: float,
+    mode: SearchMode,
+) -> tuple[str, tuple[str, ...], list[str]]:
+    """The text, the cited files and the problems of one job."""
+    if task.mode == "summarize":
+        text = summarize(llm, _document_text(corpus, document_ids, task.documents[0])).text
+        return text, (), check_task(task, text, ())
+    if task.mode == "compare":
+        comparison = compare(
+            llm, [_document_text(corpus, document_ids, name) for name in task.documents]
+        )
+        cited = tuple(entry.name for entry in comparison.sources)
+        if not comparison.grounded:
+            return comparison.text, cited, [f"gave no comparison ({comparison.reason})"]
+        return comparison.text, cited, check_task(task, comparison.text, cited)
+    retrieved = retrieve(
+        corpus.session, embedder, corpus.store, task.request, top_k=max(top_k, 8), mode=mode
+    )
+    extraction = extract(llm, task.request, retrieved, min_score)
+    text = "\n".join(f"{row.item}: {row.value}" for row in extraction.rows)
+    cited = tuple(source.source for source in extraction.sources)
+    if not extraction.rows:
+        return text, cited, [f"found no rows ({extraction.reason})"]
+    return text, cited, check_task(task, text, cited)
+
+
+def run_tasks(
+    corpus: PreparedCorpus,
+    embedder: EmbeddingProvider,
+    llm: LLMProvider,
+    dataset: Dataset,
+    *,
+    top_k: int,
+    min_score: float,
+    mode: SearchMode,
+    only_ids: set[str] | None = None,
+) -> list[TaskOutcome]:
+    """Each job goes through the same code as the `/tasks` routes, over the throwaway library."""
+    document_ids = {
+        d.original_filename: d.id
+        for d in corpus.session.scalars(select(Document).where(Document.status == DOC_ACTIVE))
+    }
+    outcomes = []
+    for task in dataset.tasks:
+        if only_ids is not None and task.id not in only_ids:
+            continue
+        started = time.monotonic()
+        try:
+            text, cited, problems = _run_task(
+                corpus,
+                embedder,
+                llm,
+                task,
+                document_ids,
+                top_k=top_k,
+                min_score=min_score,
+                mode=mode,
+            )
+        except LLMError as exc:
+            text, cited, problems = "", (), [f"model error: {exc}"]
+        except (LookupError, ValueError) as exc:
+            text, cited, problems = "", (), [f"could not run: {exc}"]
+        outcomes.append(TaskOutcome(task, text, cited, problems, time.monotonic() - started))
+    return outcomes
+
+
 def run_evaluation(
     embedder: EmbeddingProvider,
     dataset: Dataset,
@@ -390,6 +514,20 @@ def run_evaluation(
             if llm is not None
             else []
         )
+        tasks = (
+            run_tasks(
+                corpus,
+                embedder,
+                llm,
+                dataset,
+                top_k=top_k,
+                min_score=min_score,
+                mode=mode,
+                only_ids=answer_ids,
+            )
+            if llm is not None
+            else []
+        )
         return EvalRun(
             embedding_model=embedder.model_name,
             llm_model=getattr(llm, "model_name", None) if llm is not None else None,
@@ -405,4 +543,6 @@ def run_evaluation(
             mode=mode,
             by_mode=by_mode,
             follow_ups=follow_ups,
+            tasks=tasks,
+            prompts=versions() if llm is not None else {},
         )

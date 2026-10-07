@@ -1,20 +1,30 @@
 import json
+import re
+from pathlib import Path
 
 import pytest
 
 from app.ai.llm.base import LLMUnavailableError
-from app.evaluation.dataset import DEFAULT_EVAL_DIR, EvalQuestion, ExpectedSource, load_dataset
+from app.evaluation.dataset import (
+    DEFAULT_EVAL_DIR,
+    EvalQuestion,
+    EvalTask,
+    ExpectedSource,
+    load_dataset,
+)
 from app.evaluation.report import format_report, to_dict
 from app.evaluation.runner import (
     RetrievalOutcome,
     analyse_gate,
     check_answer,
+    check_task,
     chunk_matches,
     first_hit_rank,
     hit_rate,
     mean_reciprocal_rank,
     run_evaluation,
 )
+from app.knowledge.answering.prompts import EXTRACT, versions
 from app.knowledge.answering.service import Answer, Source
 from app.knowledge.retrieval.service import RetrievedChunk
 from tests.fakes import FakeLLM, HashingEmbedder
@@ -388,3 +398,206 @@ def test_the_report_lists_failed_follow_ups_with_what_was_searched_for(dataset) 
     follow_ups = to_dict(result)["follow_ups"]
     assert follow_ups[0]["id"] == "fu-invoice-amount" and follow_ups[0]["passed"] is False
     json.dumps(to_dict(result))  # still plain JSON
+
+
+# --- summarize, compare and extract jobs -----------------------------------------------------
+
+TASK_IDS = {
+    "task-summarize-lisbon",
+    "task-summarize-devices",
+    "task-compare-invoices",
+    "task-extract-invoices",
+    "task-extract-devices",
+}
+LISBON_SUMMARY = (
+    "A trip to Lisbon: the 9:40 train, Hotel Alfama for three nights, a 450 euro budget."
+)
+DEVICES_SUMMARY = (
+    "The ZX-400 router is SN-7F3K-9921; the Brightprint BP-30 printer is SN-2B8M-1146."
+)
+INVOICES_COMPARISON = (
+    "In 2026 the Lisbon workshop came to 1,284.50 euros [1]; in 2025 the Madrid conference "
+    "came to 2,150.00 euros [2]."
+)
+INVOICE = re.compile(r"(INV-\d{4}-\d{4}).*?totals ([\d,.]+)")
+SERIAL = re.compile(r"(SN-\w+-\w+)")
+
+
+class NoteReader(FakeLLM):
+    """Answers an extraction the way a good model would: by reading the numbered notes it was
+    given and writing the table. Every other prompt gets the scripted replies."""
+
+    def generate(self, system: str, user: str) -> str:
+        reply = super().generate(system, user)
+        if system != EXTRACT.system:
+            return reply
+        wanted = user.rsplit("Request:", 1)[1]
+        rows = []
+        for number, body in re.findall(
+            r"=== NOTE (\d+) BEGIN \w+ ===\n(.*?)\n=== NOTE \d+ END", user, re.DOTALL
+        ):
+            if "serial" in wanted:
+                found = [(serial, serial) for serial in SERIAL.findall(body)]
+            else:
+                found = INVOICE.findall(body)
+            rows += [{"item": item, "value": value, "note": int(number)} for item, value in found]
+        return json.dumps(rows)
+
+
+def reader() -> NoteReader:
+    llm = NoteReader()
+    llm.script = [LISBON_SUMMARY, DEVICES_SUMMARY, INVOICES_COMPARISON]
+    return llm
+
+
+def test_jobs_need_the_model_and_are_not_part_of_the_retrieval_numbers(dataset) -> None:
+    result = run(dataset)
+
+    assert result.tasks == [] and result.prompts == {}
+    assert len(result.retrieval) == len(dataset.questions)
+
+
+def test_a_model_that_does_each_job_well_passes_every_shipped_task(dataset) -> None:
+    # The stand-in embedder scores a natural request low (the invoices come at about 0.1), so the
+    # relevance gate is opened; the real model clears it, as the live evaluation shows.
+    result = run(dataset, llm=reader(), answer_ids=TASK_IDS, min_score=0.0)
+
+    assert [o.task.id for o in result.tasks] == [t.id for t in dataset.tasks]
+    for outcome in result.tasks:
+        assert outcome.passed, (outcome.task.id, outcome.problems, outcome.text)
+    comparison = next(o for o in result.tasks if o.task.mode == "compare")
+    assert set(comparison.cited) == {"invoices-2026.md", "invoices-2025.md"}
+    invoices = next(o for o in result.tasks if o.task.id == "task-extract-invoices")
+    assert "INV-2026-0418: 1,284.50" in invoices.text and "INV-2025-0533: 780.00" in invoices.text
+    assert result.answers == [] and result.follow_ups == []  # only the jobs were asked for
+
+
+def test_the_run_records_the_prompts_it_was_made_with(dataset) -> None:
+    result = run(dataset, llm=FakeLLM("INSUFFICIENT"), answer_ids={"oats-simmer"})
+
+    assert result.prompts == versions()
+    assert set(result.prompts) >= {"answer", "rewrite", "summarize", "compare", "extract"}
+
+
+def test_only_the_requested_jobs_run(dataset) -> None:
+    llm = reader()
+    llm.script = [DEVICES_SUMMARY]
+
+    result = run(dataset, llm=llm, answer_ids={"task-summarize-devices"})
+
+    assert [o.task.id for o in result.tasks] == ["task-summarize-devices"]
+    assert result.tasks[0].passed, result.tasks[0].problems
+
+
+def test_a_summary_that_loses_a_fact_or_adds_one_fails(dataset) -> None:
+    llm = reader()
+    llm.script = ["A trip to Berlin by train.", DEVICES_SUMMARY]
+
+    result = run(dataset, llm=llm, answer_ids={"task-summarize-lisbon", "task-summarize-devices"})
+
+    lisbon, devices = result.tasks
+    assert not lisbon.passed and devices.passed
+    assert any("missing" in problem and "450" in problem for problem in lisbon.problems)
+    assert any("forbidden text 'berlin'" in problem for problem in lisbon.problems)
+
+
+def test_a_comparison_that_cites_one_note_only_fails(dataset) -> None:
+    llm = reader()
+    llm.script = ["In 2026 the Lisbon workshop was 1,284.50 euros [1]; in 2025 Madrid, 2,150.00."]
+
+    (outcome,) = run(dataset, llm=llm, answer_ids={"task-compare-invoices"}).tasks
+
+    assert outcome.problems == ["did not cite: invoices-2025.md"]
+    assert outcome.cited == ("invoices-2026.md",)
+
+
+def test_a_comparison_that_cites_nothing_is_withheld_and_fails(dataset) -> None:
+    llm = reader()
+    llm.script = ["The two years differ."]
+
+    (outcome,) = run(dataset, llm=llm, answer_ids={"task-compare-invoices"}).tasks
+
+    assert outcome.problems == ["gave no comparison (no_valid_citation)"]
+
+
+def test_an_extraction_the_model_cannot_write_as_a_table_fails(dataset) -> None:
+    llm = FakeLLM("Here are the invoices: INV-2026-0418.")
+
+    (outcome,) = run(dataset, llm=llm, answer_ids={"task-extract-invoices"}).tasks
+
+    assert outcome.problems == ["found no rows (unreadable)"] and outcome.text == ""
+
+
+def test_a_forbidden_row_fails_the_extraction(dataset) -> None:
+    rows = [
+        {"item": "INV-2026-0418", "value": "1,284.50", "note": 1},
+        {"item": "INV-2027-0001", "value": "960", "note": 1},
+    ]
+    llm = FakeLLM(json.dumps(rows))
+
+    (outcome,) = run(dataset, llm=llm, answer_ids={"task-extract-invoices"}).tasks
+
+    assert any("forbidden text 'INV-2027'" in problem for problem in outcome.problems)
+
+
+def test_a_model_that_cannot_be_reached_fails_the_jobs_without_stopping_the_run(dataset) -> None:
+    llm = FakeLLM(error=LLMUnavailableError("Ollama is not reachable"))
+
+    result = run(dataset, llm=llm, answer_ids=TASK_IDS)
+
+    assert len(result.tasks) == len(TASK_IDS)
+    assert all(o.problems == ["model error: Ollama is not reachable"] for o in result.tasks)
+
+
+def test_a_document_that_could_not_be_ingested_fails_its_job_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "corpus").mkdir()
+    (tmp_path / "corpus" / "blank.md").write_text("   \n", encoding="utf-8")
+    (tmp_path / "corpus" / "ok.md").write_text("The code is 4711.\n", encoding="utf-8")
+
+    def summarize_job(task_id: str, name: str, phrase: str) -> dict:
+        return {
+            "id": task_id,
+            "mode": "summarize",
+            "documents": [name],
+            "answer_contains": [[phrase]],
+        }
+
+    questions = {
+        "questions": [{"id": "q", "type": "unanswerable", "question": "Why?"}],
+        "tasks": [
+            summarize_job("t-blank", "blank.md", "x"),
+            summarize_job("t-ok", "ok.md", "4711"),
+        ],
+    }
+    (tmp_path / "questions.json").write_text(json.dumps(questions), encoding="utf-8")
+
+    result = run(load_dataset(tmp_path), llm=FakeLLM("The code is 4711."))
+
+    blank, ok = result.tasks
+    assert blank.problems and blank.problems[0].startswith("could not run:")
+    assert ok.passed, ok.problems
+
+
+def test_checking_a_result_by_its_phrases_and_its_cited_notes() -> None:
+    task = EvalTask(
+        id="t",
+        mode="compare",
+        documents=("a.md", "b.md"),
+        expected_sources=("a.md", "b.md"),
+        answer_contains=(("Alpha",), ("two", "2")),
+        answer_must_not_contain=("beta",),
+    )
+
+    assert check_task(task, "ALPHA has 2 items", ["b.md", "a.md"]) == []
+    assert check_task(task, "alpha", ["a.md", "b.md"]) == ["result is missing: 'two' / '2'"]
+    assert check_task(task, "alpha two Beta", ["a.md", "b.md"]) == [
+        "result contains forbidden text 'beta'"
+    ]
+    assert check_task(task, "alpha two", ["a.md"]) == ["did not cite: b.md"]
+    assert check_task(task, "", []) == [
+        "result is missing: 'Alpha'",
+        "result is missing: 'two' / '2'",
+        "did not cite: a.md, b.md",
+    ]
