@@ -44,6 +44,28 @@ class EvalQuestion:
         return self.type != "unanswerable"
 
 
+TaskMode = Literal["summarize", "compare", "extract"]
+_TASK_MODES = ("summarize", "compare", "extract")
+
+
+@dataclass(frozen=True)
+class EvalTask:
+    """A job beyond answering a question, with what its result must and must not contain."""
+
+    id: str
+    mode: TaskMode
+    # summarize: one file; compare: two to four. Names of files in the corpus.
+    documents: tuple[str, ...] = ()
+    # extract: which facts are wanted.
+    request: str = ""
+    # Files the result must cite (compare, extract), by name.
+    expected_sources: tuple[str, ...] = ()
+    # Every group must match; inside a group, any one phrase is enough (case-insensitive).
+    answer_contains: tuple[tuple[str, ...], ...] = ()
+    answer_must_not_contain: tuple[str, ...] = ()
+    note: str = ""
+
+
 @dataclass(frozen=True)
 class Dataset:
     corpus_dir: Path
@@ -51,6 +73,8 @@ class Dataset:
     # Questions that only make sense after an earlier exchange. They need the model, because
     # the follow-up is rewritten before the notes are searched, so only `--answers` runs them.
     follow_ups: tuple[EvalQuestion, ...] = ()
+    # Summarize, compare and extract jobs. They need the model, so only `--answers` runs them.
+    tasks: tuple[EvalTask, ...] = ()
 
     def of_type(self, *types: str) -> list[EvalQuestion]:
         return [q for q in self.questions if q.type in types]
@@ -89,6 +113,55 @@ def _parse_history(raw: Any, where: str) -> tuple[tuple[str, str], ...]:
         turns.append((turn["role"], turn["content"].strip()))
     _require(turns[0][0] == "user", f"{where}: the history must start with the user")
     return tuple(turns)
+
+
+def _parse_task(raw: Any, corpus_files: set[str]) -> EvalTask:
+    _require(isinstance(raw, dict), "each task must be an object")
+    task_id = raw.get("id")
+    _require(isinstance(task_id, str) and task_id.strip() != "", "every task needs an id")
+    where = f"task {task_id!r}"
+    mode = raw.get("mode")
+    _require(mode in _TASK_MODES, f"{where}: mode must be one of {_TASK_MODES}")
+
+    documents = _string_list(raw.get("documents", []), f"{where}: documents")
+    for name in documents:
+        _require(name in corpus_files, f"{where}: document {name!r} is not in the corpus")
+    _require(len(set(documents)) == len(documents), f"{where}: documents must be different")
+    if mode == "summarize":
+        _require(len(documents) == 1, f"{where}: a summary needs exactly one document")
+    elif mode == "compare":
+        _require(2 <= len(documents) <= 4, f"{where}: a comparison needs two to four documents")
+    else:
+        _require(not documents, f"{where}: an extraction searches the notes, it takes no documents")
+
+    request = raw.get("request", "")
+    if mode == "extract":
+        _require(
+            isinstance(request, str) and request.strip() != "", f"{where}: extract needs a request"
+        )
+    else:
+        _require(not request, f"{where}: only an extraction has a request")
+
+    sources = _string_list(raw.get("expected_sources", []), f"{where}: expected_sources")
+    for name in sources:
+        _require(name in corpus_files, f"{where}: expected file {name!r} is not in the corpus")
+    groups_raw = raw.get("answer_contains", [])
+    _require(isinstance(groups_raw, list), f"{where}: answer_contains must be a list of lists")
+    groups = tuple(_string_list(g, f"{where}: an answer_contains group") for g in groups_raw)
+    _require(bool(groups) and all(groups), f"{where}: needs answer_contains, with no empty group")
+    forbidden = _string_list(
+        raw.get("answer_must_not_contain", []), f"{where}: answer_must_not_contain"
+    )
+    return EvalTask(
+        id=task_id,
+        mode=mode,
+        documents=documents,
+        request=request.strip() if isinstance(request, str) else "",
+        expected_sources=sources,
+        answer_contains=groups,
+        answer_must_not_contain=forbidden,
+        note=str(raw.get("note", "")),
+    )
 
 
 def _parse_question(raw: Any, corpus_files: set[str], *, follow_up: bool = False) -> EvalQuestion:
@@ -190,7 +263,10 @@ def load_dataset(directory: Path = DEFAULT_EVAL_DIR) -> Dataset:
     follow_ups_raw = raw.get("follow_ups", [])
     _require(isinstance(follow_ups_raw, list), "'follow_ups' must be a list")
     follow_ups = tuple(_parse_question(q, corpus_files, follow_up=True) for q in follow_ups_raw)
-    ids = [q.id for q in (*questions, *follow_ups)]
+    tasks_raw = raw.get("tasks", [])
+    _require(isinstance(tasks_raw, list), "'tasks' must be a list")
+    tasks = tuple(_parse_task(t, corpus_files) for t in tasks_raw)
+    ids = [*(q.id for q in questions), *(q.id for q in follow_ups), *(t.id for t in tasks)]
     _require(len(ids) == len(set(ids)), "question ids must be unique")
     _require(bool(questions), "there are no questions")
-    return Dataset(corpus_dir=corpus_dir, questions=questions, follow_ups=follow_ups)
+    return Dataset(corpus_dir=corpus_dir, questions=questions, follow_ups=follow_ups, tasks=tasks)

@@ -179,3 +179,112 @@ def test_a_history_in_the_ordinary_questions_is_refused(tmp_path: Path) -> None:
 def test_follow_ups_must_be_a_list(tmp_path: Path) -> None:
     with pytest.raises(DatasetError, match="'follow_ups' must be a list"):
         load_dataset(_write_with_follow_ups(tmp_path, {"id": "x"}))
+
+
+# --- task entries: summarize, compare, extract -----------------------------------------------
+
+SUMMARIZE = {
+    "id": "t-sum",
+    "mode": "summarize",
+    "documents": ["a.md"],
+    "answer_contains": [["x"]],
+}
+COMPARE = {
+    "id": "t-cmp",
+    "mode": "compare",
+    "documents": ["a.md", "b.md"],
+    "expected_sources": ["a.md", "b.md"],
+    "answer_contains": [["x"], ["y", "z"]],
+}
+EXTRACT = {
+    "id": "t-ext",
+    "mode": "extract",
+    "request": "every total",
+    "expected_sources": ["a.md"],
+    "answer_contains": [["100"]],
+    "answer_must_not_contain": ["999"],
+}
+
+
+def _write_with_tasks(tmp_path: Path, tasks: object) -> Path:
+    (tmp_path / "corpus").mkdir()
+    for name in ("a.md", "b.md", "c.md", "d.md", "e.md"):
+        (tmp_path / "corpus" / name).write_text("text", encoding="utf-8")
+    payload = {"questions": [ANSWERABLE], "tasks": tasks}
+    (tmp_path / "questions.json").write_text(json.dumps(payload), encoding="utf-8")
+    return tmp_path
+
+
+def test_the_shipped_set_has_a_task_for_every_mode() -> None:
+    dataset = load_dataset()
+
+    assert {task.mode for task in dataset.tasks} == {"summarize", "compare", "extract"}
+    ids = [x.id for x in (*dataset.questions, *dataset.follow_ups, *dataset.tasks)]
+    assert len(ids) == len(set(ids))
+    files = {p.name for p in dataset.corpus_dir.rglob("*") if p.is_file()}
+    for task in dataset.tasks:
+        assert task.answer_contains, task.id
+        assert set(task.documents) | set(task.expected_sources) <= files, task.id
+
+
+def test_tasks_are_kept_apart_from_the_questions() -> None:
+    dataset = load_dataset()
+
+    # Retrieval measurements must not pick them up: they need the model.
+    assert not any(q.id.startswith("task-") for q in (*dataset.questions, *dataset.follow_ups))
+
+
+def test_a_set_without_tasks_has_none(tmp_path: Path) -> None:
+    assert load_dataset(_write(tmp_path, [ANSWERABLE])).tasks == ()
+
+
+def test_valid_tasks_of_each_mode_load(tmp_path: Path) -> None:
+    dataset = load_dataset(_write_with_tasks(tmp_path, [SUMMARIZE, COMPARE, EXTRACT]))
+
+    summarize, compare, extract = dataset.tasks
+    assert (summarize.mode, summarize.documents) == ("summarize", ("a.md",))
+    assert compare.documents == ("a.md", "b.md")
+    assert compare.answer_contains == (("x",), ("y", "z"))
+    assert extract.request == "every total" and extract.documents == ()
+    assert extract.answer_must_not_contain == ("999",)
+
+
+@pytest.mark.parametrize(
+    ("task", "message"),
+    [
+        ({**SUMMARIZE, "id": ""}, "every task needs an id"),
+        ({**SUMMARIZE, "mode": "translate"}, "mode must be one of"),
+        ({k: v for k, v in SUMMARIZE.items() if k != "mode"}, "mode must be one of"),
+        ({**SUMMARIZE, "documents": []}, "exactly one document"),
+        ({**SUMMARIZE, "documents": ["a.md", "b.md"]}, "exactly one document"),
+        ({**SUMMARIZE, "documents": ["nothing.md"]}, "not in the corpus"),
+        ({**SUMMARIZE, "request": "x"}, "only an extraction has a request"),
+        ({**COMPARE, "documents": ["a.md"]}, "two to four documents"),
+        ({**COMPARE, "documents": ["a.md", "b.md", "c.md", "d.md", "e.md"]}, "two to four"),
+        ({**COMPARE, "documents": ["a.md", "a.md"]}, "must be different"),
+        ({**COMPARE, "expected_sources": ["nothing.md"]}, "expected file"),
+        ({**EXTRACT, "documents": ["a.md"]}, "takes no documents"),
+        ({**EXTRACT, "request": "  "}, "extract needs a request"),
+        ({k: v for k, v in EXTRACT.items() if k != "request"}, "extract needs a request"),
+        ({**SUMMARIZE, "answer_contains": []}, "needs answer_contains"),
+        ({**SUMMARIZE, "answer_contains": [[]]}, "no empty group"),
+        ({**SUMMARIZE, "answer_contains": "x"}, "list of lists"),
+        ({**SUMMARIZE, "answer_must_not_contain": "x"}, "list of non-empty strings"),
+        ("not an object", "must be an object"),
+    ],
+)
+def test_malformed_tasks_are_rejected_with_a_clear_message(
+    tmp_path: Path, task: object, message: str
+) -> None:
+    with pytest.raises(DatasetError, match=message):
+        load_dataset(_write_with_tasks(tmp_path, [task]))
+
+
+def test_a_task_id_cannot_repeat_a_question_id(tmp_path: Path) -> None:
+    with pytest.raises(DatasetError, match="unique"):
+        load_dataset(_write_with_tasks(tmp_path, [{**SUMMARIZE, "id": "q1"}]))
+
+
+def test_tasks_must_be_a_list(tmp_path: Path) -> None:
+    with pytest.raises(DatasetError, match="'tasks' must be a list"):
+        load_dataset(_write_with_tasks(tmp_path, {"id": "x"}))

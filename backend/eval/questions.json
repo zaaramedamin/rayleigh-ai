@@ -417,5 +417,45 @@
       "question": "How long is its battery life?",
       "note": "'its' is the router. The notes say nothing about a battery, and must not be answered from another device."
     }
+  ],
+  "tasks": [
+    {
+      "id": "task-summarize-lisbon",
+      "mode": "summarize",
+      "documents": ["lisbon-trip.md"],
+      "answer_contains": [["train"], ["hotel", "alfama"], ["450"]],
+      "answer_must_not_contain": ["berlin"],
+      "note": "A short note: the summary must keep the facts from every section and invent none."
+    },
+    {
+      "id": "task-summarize-devices",
+      "mode": "summarize",
+      "documents": ["devices.md"],
+      "answer_contains": [["ZX-400"], ["SN-7F3K-9921"], ["BP-30", "brightprint"], ["SN-2B8M-1146"]],
+      "note": "Exact codes must survive summarizing unchanged."
+    },
+    {
+      "id": "task-compare-invoices",
+      "mode": "compare",
+      "documents": ["invoices-2026.md", "invoices-2025.md"],
+      "expected_sources": ["invoices-2026.md", "invoices-2025.md"],
+      "answer_contains": [["lisbon"], ["madrid"], ["1,284.50"], ["2,150.00"]],
+      "note": "Two notes that differ only in the year: the comparison must keep them apart and cite both."
+    },
+    {
+      "id": "task-extract-invoices",
+      "mode": "extract",
+      "request": "every invoice number with its total",
+      "expected_sources": ["invoices-2026.md", "invoices-2025.md"],
+      "answer_contains": [["1,284.50"], ["960"], ["2,150.00"], ["780"]],
+      "answer_must_not_contain": ["INV-2027"]
+    },
+    {
+      "id": "task-extract-devices",
+      "mode": "extract",
+      "request": "the serial number of each device",
+      "expected_sources": ["devices.md"],
+      "answer_contains": [["SN-7F3K-9921"], ["SN-2B8M-1146"]]
+    }
   ]
 }
