@@ -1729,6 +1729,31 @@
   align-items: center;
   gap: 4px 14px;
 }
+.inspector-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.inspector-summary p {
+  margin: 0;
+}
+.inspector-summary-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+.inspector-summary-text {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.5;
+}
 .inspector-chunks {
   display: flex;
   flex-direction: column;

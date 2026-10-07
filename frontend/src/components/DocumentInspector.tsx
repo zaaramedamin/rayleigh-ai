@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Api, ChunkInfo, DocumentDetail } from "../api/types";
 import { locationPath, locationState } from "../lib/documents";
+import { DocumentSummary, summaryBlocked } from "./DocumentSummary";
 import { locationLabel } from "./SourceCard";
 
 const PAGE_SIZE = 20;
@@ -76,6 +77,9 @@ export function DocumentInspector({ api, id, onClose }: { api: Api; id: number; 
             {detail.indexed_chunks} of {detail.chunks} passages are searchable.
             {detail.supersedes_id !== null && " This file was edited; this is its newest version."}
           </p>
+
+          <h4 className="inspector-title">SUMMARY</h4>
+          <DocumentSummary api={api} id={id} blocked={summaryBlocked(detail)} />
 
           <h4 className="inspector-title">WHERE IT WAS FOUND</h4>
           {detail.locations.length === 0 ? (
