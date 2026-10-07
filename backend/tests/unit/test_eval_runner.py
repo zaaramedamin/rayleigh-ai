@@ -601,3 +601,55 @@ def test_checking_a_result_by_its_phrases_and_its_cited_notes() -> None:
         "result is missing: 'two' / '2'",
         "did not cite: a.md, b.md",
     ]
+
+
+# --- the report ------------------------------------------------------------------------------
+
+
+def test_the_report_summarizes_the_jobs_by_mode(dataset) -> None:
+    result = run(dataset, llm=reader(), answer_ids=TASK_IDS, min_score=0.0)
+
+    text = format_report(result)
+
+    assert "TASK MODES" in text and "5 jobs" in text
+    assert "summarize  2/2 kept the facts that matter and added none  (100.0%)" in text
+    assert "compare    1/1 kept the facts apart and cited the notes  (100.0%)" in text
+    assert "extract    2/2 found the rows and cited their notes  (100.0%)" in text
+    assert "time per job: median" in text
+    assert "FAIL" not in text
+
+
+def test_the_report_names_the_prompt_versions_of_the_run(dataset) -> None:
+    result = run(dataset, llm=FakeLLM("INSUFFICIENT"), answer_ids={"oats-simmer"})
+
+    text = format_report(result)
+
+    assert "  prompts: answer v1 (" in text and "extract v1 (" in text
+    assert to_dict(result)["settings"]["prompts"] == versions()
+    assert "prompts:" not in format_report(run(dataset))  # no model, no prompts to name
+
+
+def test_the_report_lists_a_failed_job_with_what_it_produced(dataset) -> None:
+    llm = reader()
+    llm.script = ["A trip to Berlin by train.", DEVICES_SUMMARY]
+
+    result = run(dataset, llm=llm, answer_ids={"task-summarize-lisbon", "task-summarize-devices"})
+    text = format_report(result)
+
+    assert "summarize  1/2" in text
+    assert "FAIL  task-summarize-lisbon: result is missing:" in text
+    assert "produced: 'A trip to Berlin by train.'" in text
+    jobs = to_dict(result)["tasks"]
+    assert [(j["id"], j["mode"], j["passed"]) for j in jobs] == [
+        ("task-summarize-lisbon", "summarize", False),
+        ("task-summarize-devices", "summarize", True),
+    ]
+    assert jobs[0]["problems"] and jobs[1]["cited"] == []
+    json.dumps(to_dict(result))  # still plain JSON
+
+
+def test_a_report_without_jobs_has_no_job_section(dataset) -> None:
+    text = format_report(run(dataset, llm=FakeLLM("INSUFFICIENT"), answer_ids={"oats-simmer"}))
+
+    assert "TASK MODES" not in text
+    assert to_dict(run(dataset))["tasks"] == []

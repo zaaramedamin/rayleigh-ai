@@ -160,6 +160,38 @@ def _follow_ups_section(run: EvalRun) -> list[str]:
     return lines
 
 
+def _tasks_section(run: EvalRun) -> list[str]:
+    if not run.tasks:
+        return []
+    lines = [
+        f"TASK MODES  (summarize, compare and extract, written from the notes, "
+        f"{len(run.tasks)} jobs)"
+    ]
+    labels = {
+        "summarize": "kept the facts that matter and added none",
+        "compare": "kept the facts apart and cited the notes",
+        "extract": "found the rows and cited their notes",
+    }
+    for mode, label in labels.items():
+        outcomes = [o for o in run.tasks if o.task.mode == mode]
+        if outcomes:
+            passed = sum(o.passed for o in outcomes)
+            lines.append(
+                f"  {mode:<10} {passed}/{len(outcomes)} {label}"
+                f"  ({_pct(passed / len(outcomes)).strip()})"
+            )
+    seconds = [o.seconds for o in run.tasks]
+    lines.append(
+        f"  time per job: median {statistics.median(seconds):.1f}s, max {max(seconds):.1f}s"
+    )
+    for outcome in run.tasks:
+        if not outcome.passed:
+            lines.append(f"  FAIL  {outcome.task.id}: " + "; ".join(outcome.problems))
+            if outcome.text:
+                lines.append(f"        produced: {' '.join(outcome.text.split())[:160]!r}")
+    return lines
+
+
 def format_report(run: EvalRun) -> str:
     header = [
         "EVALUATION",
@@ -169,6 +201,10 @@ def format_report(run: EvalRun) -> str:
         f"  chunk size {run.chunk_size}, overlap {run.chunk_overlap}, top_k {run.top_k}, "
         f"search mode {run.mode}",
     ]
+    if run.prompts:
+        header.append(
+            "  prompts: " + ", ".join(f"{name} {text}" for name, text in run.prompts.items())
+        )
     sections = [
         header,
         _retrieval_section(run),
@@ -176,6 +212,7 @@ def format_report(run: EvalRun) -> str:
         _gate_section(run),
         _answers_section(run),
         _follow_ups_section(run),
+        _tasks_section(run),
     ]
     return "\n\n".join("\n".join(section) for section in sections if section)
 
@@ -191,6 +228,7 @@ def to_dict(run: EvalRun) -> dict[str, Any]:
             "top_k": run.top_k,
             "answer_min_score": run.min_score,
             "search_mode": run.mode,
+            "prompts": run.prompts,
         },
         "modes": {
             name: {
@@ -253,5 +291,16 @@ def to_dict(run: EvalRun) -> dict[str, Any]:
                 "seconds": round(f.seconds, 2),
             }
             for f in run.follow_ups
+        ],
+        "tasks": [
+            {
+                "id": t.task.id,
+                "mode": t.task.mode,
+                "passed": t.passed,
+                "problems": t.problems,
+                "cited": list(t.cited),
+                "seconds": round(t.seconds, 2),
+            }
+            for t in run.tasks
         ],
     }
