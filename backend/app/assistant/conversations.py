@@ -95,7 +95,7 @@ def _payload_json(payload: dict[str, Any] | None) -> str | None:
     return text
 
 
-def _cited_documents(payload: dict[str, Any] | None) -> str:
+def cited_documents(payload: dict[str, Any] | None) -> str:
     """ ",12,40," for the sources named in a payload, or an empty string."""
     sources = payload.get("sources") if payload else None
     if not isinstance(sources, list):
@@ -188,7 +188,7 @@ def append_messages(
         if len(content) > MAX_CONTENT_CHARS:
             raise ValueError(f"a message is longer than {MAX_CONTENT_CHARS} characters")
         prepared.append(
-            (message, content, _payload_json(message.payload), _cited_documents(message.payload))
+            (message, content, _payload_json(message.payload), cited_documents(message.payload))
         )
 
     last = session.scalar(
