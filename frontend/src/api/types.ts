@@ -200,6 +200,19 @@ export interface DocumentDetail extends LibraryDocument {
   indexed_chunks: number;
 }
 
+/** A short summary of one document, written by the local model from the document's own text. */
+export interface Summary {
+  text: string;
+  document_id: number;
+  name: string;
+  /** How many parts the document was cut into. */
+  parts: number;
+  /** How many of them were summarized. */
+  covered_parts: number;
+  /** True when the document was longer than one summary reads, so only its start was summarized. */
+  truncated: boolean;
+}
+
 /** One passage a document was cut into. */
 export interface ChunkInfo {
   index: number;
@@ -417,6 +430,8 @@ export interface Api {
   documents(): Promise<DocumentList>;
   documentDetail(id: number): Promise<DocumentDetail>;
   documentChunks(id: number, offset?: number, limit?: number): Promise<ChunkPage>;
+  /** Ask the local model for a short summary of one document. Can take a minute for a long one. */
+  summarizeDocument(id: number): Promise<Summary>;
   deleteDocument(id: number): Promise<void>;
   restoreRemoved(): Promise<number>;
   folders(): Promise<LibraryFolder[]>;

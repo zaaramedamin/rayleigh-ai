@@ -28,6 +28,7 @@ import type {
   SearchFilters,
   SearchResult,
   SettingsInfo,
+  Summary,
   SyncStatus,
   SystemStatus,
   Transcription,
@@ -208,6 +209,7 @@ export function createApi(base = "/api/v1", hooks?: AuthHooks): Api {
     documentDetail: (id) => call<DocumentDetail>(`/library/documents/${id}`),
     documentChunks: (id, offset = 0, limit = 20) =>
       call<ChunkPage>(`/library/documents/${id}/chunks?${new URLSearchParams({ offset: String(offset), limit: String(limit) })}`),
+    summarizeDocument: (id) => call<Summary>("/tasks/summarize", json({ document_id: id })),
     deleteDocument: (id) => call<void>(`/library/documents/${id}`, { method: "DELETE" }),
     restoreRemoved: async () => (await call<{ restored: number }>("/library/removed/restore", { method: "POST" })).restored,
     folders: async () => (await call<{ folders: LibraryFolder[] }>("/library/folders")).folders,

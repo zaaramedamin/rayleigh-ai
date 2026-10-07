@@ -18,6 +18,7 @@ import type {
   ProfileValues,
   SearchResult,
   SettingsInfo,
+  Summary,
   SyncStatus,
   VoiceStatus,
 } from "./types";
@@ -333,6 +334,20 @@ export function createMockApi(): Api {
           ]
         : [];
       return { total: chunks.length, chunks };
+    },
+    summarizeDocument: async (id): Promise<Summary> => {
+      await wait(900);
+      const doc = documents.find((d) => d.id === id);
+      if (!doc) throw new Error("That document is not in the library.");
+      const note = NOTES.find((n) => n.document_id === id);
+      return {
+        text: note ? `${doc.name}: ${note.text}` : `${doc.name} has no passages to summarize yet.`,
+        document_id: doc.id,
+        name: doc.name,
+        parts: 1,
+        covered_parts: 1,
+        truncated: false,
+      };
     },
     deleteDocument: async (id) => {
       await wait(200);
