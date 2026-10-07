@@ -324,6 +324,32 @@ export interface AskStreamHandlers {
   onToken?: (text: string) => void;
 }
 
+/** What a mark on an answer says. The last three say it went wrong. */
+export type FeedbackKind = "helpful" | "not_helpful" | "wrong_source" | "missing_info";
+
+/** A mark you put on an answer, kept on this computer so a failure can become an evaluation question. */
+export interface FeedbackMark {
+  id: number;
+  kind: FeedbackKind;
+  mode: ChatMode;
+  question: string;
+  answer: string;
+  note: string | null;
+  details: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NewFeedback {
+  kind: FeedbackKind;
+  mode: ChatMode;
+  question: string;
+  answer: string;
+  note?: string | null;
+  /** What the interface knew about the answer: its sources, why it was refused. */
+  details?: Record<string, unknown> | null;
+}
+
 /** What the program is set to do (read-only). */
 export interface SettingsInfo {
   version: string;
@@ -408,6 +434,10 @@ export interface Api {
   addMessages(id: number, messages: NewStoredMessage[]): Promise<ConversationInfo>;
   deleteConversation(id: number): Promise<void>;
   deleteConversations(): Promise<number>;
+
+  addFeedback(mark: NewFeedback): Promise<FeedbackMark>;
+  changeFeedback(id: number, kind: FeedbackKind, note?: string | null): Promise<FeedbackMark>;
+  deleteFeedback(id: number): Promise<void>;
 
   profile(): Promise<Profile>;
   saveProfile(values: ProfileValues): Promise<Profile>;

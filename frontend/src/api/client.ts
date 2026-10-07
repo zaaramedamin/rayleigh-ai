@@ -12,6 +12,8 @@ import type {
   ConversationList,
   DocumentDetail,
   DocumentList,
+  FeedbackKind,
+  FeedbackMark,
   FileTypeInfo,
   FolderRemoval,
   Health,
@@ -19,6 +21,7 @@ import type {
   LibraryFolder,
   Memory,
   MemoryList,
+  NewFeedback,
   NewStoredMessage,
   Profile,
   ProfileValues,
@@ -227,6 +230,11 @@ export function createApi(base = "/api/v1", hooks?: AuthHooks): Api {
     addMessages: (id, messages: NewStoredMessage[]) => call<ConversationInfo>(`/conversations/${id}/messages`, json({ messages })),
     deleteConversation: (id) => call<void>(`/conversations/${id}`, { method: "DELETE" }),
     deleteConversations: async () => (await call<{ deleted: number }>("/conversations", { method: "DELETE" })).deleted,
+
+    addFeedback: (mark: NewFeedback) => call<FeedbackMark>("/feedback", json(mark)),
+    changeFeedback: (id: number, kind: FeedbackKind, note?: string | null) =>
+      call<FeedbackMark>(`/feedback/${id}`, { method: "PUT", body: JSON.stringify({ kind, ...(note ? { note } : {}) }) }),
+    deleteFeedback: (id: number) => call<void>(`/feedback/${id}`, { method: "DELETE" }),
 
     profile: () => call<Profile>("/profile"),
     saveProfile: (values: ProfileValues) => call<Profile>("/profile", { method: "PUT", body: JSON.stringify(values) }),

@@ -9,6 +9,7 @@ import type {
   ConversationDetail,
   ConversationInfo,
   DocumentDetail,
+  FeedbackMark,
   JobInfo,
   LibraryDocument,
   LibraryFolder,
@@ -148,6 +149,9 @@ export function createMockApi(): Api {
   let conversations: ConversationDetail[] = [];
   let nextConversationId = 1;
   let nextMessageId = 1;
+  // Marks on answers are kept in memory only, like everything else in the demo.
+  let marks: FeedbackMark[] = [];
+  let nextMarkId = 1;
   const findConversation = (id: number): ConversationDetail => {
     const found = conversations.find((c) => c.id === id);
     if (!found) throw new ApiError("not_found", "That conversation does not exist.", 404);
@@ -448,6 +452,35 @@ export function createMockApi(): Api {
       const count = conversations.length;
       conversations = [];
       return count;
+    },
+
+    addFeedback: async (mark) => {
+      const now = new Date().toISOString();
+      const created: FeedbackMark = {
+        id: nextMarkId++,
+        kind: mark.kind,
+        mode: mark.mode,
+        question: mark.question,
+        answer: mark.answer,
+        note: mark.note ?? null,
+        details: mark.details ?? null,
+        created_at: now,
+        updated_at: now,
+      };
+      marks = [...marks, created];
+      return created;
+    },
+    changeFeedback: async (id, kind, note) => {
+      const found = marks.find((m) => m.id === id);
+      if (!found) throw new ApiError("not_found", "That mark does not exist.", 404);
+      found.kind = kind;
+      if (note) found.note = note;
+      found.updated_at = new Date().toISOString();
+      return { ...found };
+    },
+    deleteFeedback: async (id) => {
+      if (!marks.some((m) => m.id === id)) throw new ApiError("not_found", "That mark does not exist.", 404);
+      marks = marks.filter((m) => m.id !== id);
     },
 
     profile: async () => profileOut(),

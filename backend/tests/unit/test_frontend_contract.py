@@ -50,6 +50,7 @@ MIRRORED = {
     "ConversationList": "ConversationList",
     "StoredMessage": "MessageOut",
     "ConversationDetail": "ConversationDetail",
+    "FeedbackMark": "FeedbackOut",
 }
 
 # Response models the interface reads in a simpler way than a named type: the client unwraps them.
@@ -59,9 +60,8 @@ UNWRAPPED = {
     "TokenResponse": "client.login returns the token inside",
     "ClearedMemories": "client.clearMemories returns the count inside",
     "ClearedConversations": "client.deleteConversations returns the count inside",
-    "FeedbackOut": "not used by the interface yet",
-    "FeedbackList": "not used by the interface yet",
-    "ClearedFeedback": "not used by the interface yet",
+    "FeedbackList": "the interface does not list marks; `python -m app feedback` does",
+    "ClearedFeedback": "the interface takes back one mark at a time",
     "ProfileFieldInfo": "an inline element of Profile.fields",
     "ProfileValues": "Record<ProfileKey, string>",
     "HTTPValidationError": "error bodies are read as { detail }",
