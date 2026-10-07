@@ -15,6 +15,7 @@ PINNED = {
     "rewrite": (1, "fb7c7adac9"),
     "summarize": (1, "52e3e2ad21"),
     "combine": (1, "b322afcb5b"),
+    "compare": (1, "f2e9eb65a3"),
 }
 
 
