@@ -9,13 +9,13 @@ import os
 import socket
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from app.ai.embeddings.base import (
@@ -36,6 +36,13 @@ from app.evaluation.network_guard import NetworkBlocked, NetworkGuard
 from app.evaluation.report import format_report, to_dict
 from app.evaluation.runner import hit_rate, run_evaluation
 from app.knowledge.answering.service import Answer, Source, compose_answer
+from app.knowledge.answering.tasks import (
+    Extraction,
+    compare,
+    extract,
+    load_document_text,
+    summarize,
+)
 from app.knowledge.chunking.service import rechunk_all
 from app.knowledge.components import (
     create_llm,
@@ -73,6 +80,7 @@ from app.security.errors import KeystoreError, SecurityError, WrongPassphraseErr
 from app.security.migrate import encrypt_library
 from app.storage.database import create_db_engine, vacuum_database
 from app.storage.migrations import database_is_up_to_date
+from app.storage.models import DOC_ACTIVE, Document
 from app.storage.vector_store import (
     QdrantVectorStore,
     VectorStoreError,
@@ -630,11 +638,15 @@ def _cmd_search(args: argparse.Namespace, settings: Settings) -> int:
 
 def _print_answer(answer: Answer) -> None:
     print(answer.text)
-    if not answer.sources:
+    _print_sources(answer.sources)
+
+
+def _print_sources(sources: Sequence[Source]) -> None:
+    if not sources:
         return
     print()
     print("Sources:")
-    for source in answer.sources:
+    for source in sources:
         heading = f" > {source.heading_path}" if source.heading_path else ""
         print(
             f"  [{source.marker}] {source.source}{heading}, "
@@ -671,6 +683,125 @@ def _cmd_ask(args: argparse.Namespace, settings: Settings) -> int:
     if pending:
         print()
         print(f"note: {pending} document(s) are not indexed yet; run `python -m app index`")
+    return 0
+
+
+def _document_id(session: Session, reference: str) -> int:
+    """A document given as its number, or as its file name (names are encrypted, so they are
+    compared here and not in the database)."""
+    if reference.isdigit():
+        return int(reference)
+    wanted = reference.casefold()
+    found = [
+        d.id
+        for d in session.scalars(select(Document).where(Document.status == DOC_ACTIVE))
+        if d.original_filename.casefold() == wanted
+    ]
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise CliError(
+            f"no current document is named {reference!r}. Use its number: `python -m app search` "
+            "shows it in the id of each result (id 4:0 is document 4)."
+        )
+    raise CliError(
+        f"{len(found)} documents are named {reference!r} (numbers {', '.join(map(str, found))}); "
+        "use a number"
+    )
+
+
+def _cmd_summarize(args: argparse.Namespace, settings: Settings) -> int:
+    """A short summary of one document, written from its own text (no search needed)."""
+    engine = _open_engine(settings)
+    with Session(engine) as session:
+        try:
+            document = load_document_text(session, _document_id(session, args.document))
+            print("reading ...", file=sys.stderr, flush=True)
+            summary = summarize(create_llm(settings), document)
+        except (LookupError, ValueError, LLMError) as exc:
+            raise CliError(str(exc)) from exc
+    print(f"Summary of {summary.name}:")
+    print(summary.text)
+    if summary.truncated:
+        print()
+        print(
+            f"note: the document is long. Only the first {summary.covered_parts} of its "
+            f"{summary.parts} parts were summarized."
+        )
+    return 0
+
+
+def _cmd_compare(args: argparse.Namespace, settings: Settings) -> int:
+    """What two to four documents have in common and where they differ, with citations."""
+    engine = _open_engine(settings)
+    with Session(engine) as session:
+        try:
+            documents = [
+                load_document_text(session, _document_id(session, ref)) for ref in args.documents
+            ]
+            print("reading ...", file=sys.stderr, flush=True)
+            comparison = compare(create_llm(settings), documents)
+        except (LookupError, ValueError, LLMError) as exc:
+            raise CliError(str(exc)) from exc
+    print(comparison.text)
+    if comparison.sources:
+        print()
+        print("Sources:")
+        for entry in comparison.sources:
+            print(f"  [{entry.marker}] {entry.name}  (document {entry.document_id})")
+    partial = [d.name for d in comparison.documents if d.document_id in comparison.truncated]
+    if partial:
+        print()
+        print(f"note: these are long, so only their start was read: {', '.join(partial)}.")
+    return 0
+
+
+_EXTRACTION_MESSAGES = {
+    "no_relevant_notes": "I don't have enough information in your notes to match that.",
+    "nothing_found": "No note holds a fact that matches the request.",
+    "unreadable": "The model's reply could not be read as a table. Try again or rephrase.",
+    "no_valid_row": (
+        "None of the rows the model wrote could be checked against your notes, so none is shown."
+    ),
+}
+
+
+def _print_extraction(result: Extraction) -> None:
+    if not result.rows:
+        print(_EXTRACTION_MESSAGES[result.reason])
+        return
+    width = max(len(row.item) for row in result.rows)
+    for row in result.rows:
+        print(f"  {row.item:<{width}}  {row.value}  [{row.marker}]")
+    _print_sources(result.sources)
+    if result.dropped:
+        print()
+        print(f"note: {result.dropped} row(s) the model wrote were refused (no such note).")
+
+
+def _cmd_extract(args: argparse.Namespace, settings: Settings) -> int:
+    """A table of the facts your notes hold that match a request, each with its source."""
+    request = " ".join(args.request)
+    engine = _open_engine(settings)
+    embedder = _load_embedder(settings)
+    with Session(engine) as session:
+        try:
+            with _open_store(settings, embedder) as store:
+                retrieved = retrieve(
+                    session,
+                    embedder,
+                    store,
+                    request,
+                    top_k=args.top_k or max(settings.retrieval_top_k, 8),
+                    document_ids=args.document,
+                    file_types=args.type,
+                    mode=args.mode or settings.search_mode,
+                )
+            print("reading ...", file=sys.stderr, flush=True)
+            result = extract(create_llm(settings), request, retrieved, settings.answer_min_score)
+        except (ValueError, VectorStoreError, LLMError, KeywordSearchUnavailable) as exc:
+            raise CliError(str(exc)) from exc
+    _print_extraction(result)
     return 0
 
 
@@ -1109,6 +1240,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "--to",
         metavar="FILE",
         help="where export writes (default: eval-private/feedback-candidates.json)",
+    )
+    summarize_command = add(
+        "summarize", _cmd_summarize, "a short summary of one document (by number or file name)"
+    )
+    summarize_command.add_argument("document", help="the document's number, or its file name")
+    compare_command = add(
+        "compare", _cmd_compare, "what two to four documents have in common and where they differ"
+    )
+    compare_command.add_argument(
+        "documents", nargs="+", metavar="document", help="two to four numbers or file names"
+    )
+    extract_command = add(
+        "extract", _cmd_extract, "a table of the facts your notes hold that match a request"
+    )
+    extract_command.add_argument("request", nargs="+", help="which facts are wanted")
+    extract_command.add_argument("--top-k", type=int, help="notes to search (default: at least 8)")
+    extract_command.add_argument(
+        "--type", action="append", help="only search this file type, e.g. .md (repeatable)"
+    )
+    extract_command.add_argument(
+        "--document", type=int, action="append", help="only search this document number"
+    )
+    extract_command.add_argument(
+        "--mode", choices=("vector", "keyword", "hybrid"), help="how notes are found"
     )
     add("rechunk", _cmd_rechunk, "rebuild all chunks (after changing chunk settings)")
     index = add("index", _cmd_index, "embed documents that are not searchable yet")
