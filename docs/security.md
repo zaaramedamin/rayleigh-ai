@@ -67,6 +67,7 @@ Read-only views of the setup (`GET /system/settings`) hold no paths, passwords, 
 - Sources shown to the user are built by the application from the database. Citation numbers from the model are validated, and invented ones are discarded. An answer with no valid citation is not returned.
 - If no note is relevant enough, the assistant refuses without calling the model.
 - The LLM server address must be on this machine (`localhost`, `127.0.0.1` or `::1`); anything else is rejected at startup. Requests ignore system proxies and refuse redirects.
+- **The instructions can never be pushed out of the model's view.** The rules above live in the system prompt, and Ollama silently drops the *start* of a prompt that is too long. Without care, a very long conversation, a very long message or very long instructions could therefore remove the very rules that make the model treat notes as data. `app/ai/llm/budget.py` keeps every prompt inside the window and gives way in a fixed order: the instructions (and the tool descriptions) and the latest message are never cut, a message that cannot share the window with them is refused, notes for an answer have their own limit that always leaves room, and earlier turns take what is left, oldest first. Tests prove the system prompt reaches the model whole after hundreds of exchanges and in the worst case the settings allow, which before this overflowed the window.
 - Questions, notes and answers are never written to logs.
 
 ## General chat
