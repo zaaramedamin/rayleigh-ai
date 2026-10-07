@@ -5,10 +5,11 @@ import time
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.assistant import feedback as service
+from app.assistant.conversations import REMOVED_NOTICE, forget_document_passages
 from app.assistant.feedback import (
     FAILURES,
     KINDS,
@@ -20,9 +21,11 @@ from app.assistant.feedback import (
     delete_feedback,
     list_feedback,
 )
+from app.knowledge.library.documents import delete_document
 from app.security.migrate import encrypt_library
 from app.security.vault import TEXT_PREFIX
 from app.storage.database import DB_FILENAME, create_db_engine
+from app.storage.files import save_file
 from app.storage.models import Feedback
 
 SOURCES = {
@@ -246,3 +249,55 @@ def test_the_words_of_a_mark_are_encrypted_with_the_library_and_still_readable(
         (found,) = list_feedback(session)
         assert found.question == secrets["question"] and secrets["details"] in (found.details or "")
     engine.dispose()
+
+
+# --- removing a document from the library ----------------------------------------------------
+
+
+def cited(document_id: int) -> dict[str, object]:
+    return {"sources": [{"document_id": document_id, "source": f"note-{document_id}.md"}]}
+
+
+def test_marks_that_quoted_a_removed_document_lose_the_answer_but_keep_the_question(
+    session: Session,
+) -> None:
+    gone = mark(session, answer="The garage code is 4821 [1].", note="wrong note", details=cited(5))
+    other = mark(session, answer="Rice needs water [1].", details=cited(15))  # 15 is not 5
+    untouched = mark(session, answer="Hello.", details=None)
+
+    scrubbed = forget_document_passages(session, [5])
+    session.commit()
+
+    assert scrubbed == 1
+    session.refresh(gone), session.refresh(other), session.refresh(untouched)
+    assert gone.answer == REMOVED_NOTICE and gone.note is None
+    assert gone.details == '{"removed": true}' and gone.cited_documents == ""
+    assert gone.question == "How long do oats simmer?"  # what the owner asked is theirs
+    assert (other.answer, untouched.answer) == ("Rice needs water [1].", "Hello.")
+
+
+def test_removing_a_document_from_the_library_scrubs_the_marks_that_quoted_it(
+    session: Session, data_dir: Path
+) -> None:
+    document = save_file(session, data_dir, b"The garage code is 4821.", "garage.md")
+    created = mark(
+        session,
+        question="What is the garage code?",
+        answer="The garage code is 4821 [1].",
+        details=cited(document.id),
+    )
+    database_file = data_dir / DB_FILENAME
+    assert b"4821" in database_file.read_bytes()
+
+    delete_document(session, data_dir, document, exclude=False)
+
+    session.refresh(created)
+    assert created.answer == REMOVED_NOTICE
+    assert b"4821" not in database_file.read_bytes()
+
+
+def test_a_library_that_has_no_feedback_table_yet_is_not_a_problem(session: Session) -> None:
+    session.execute(text("DROP TABLE feedback"))
+    session.commit()
+
+    assert forget_document_passages(session, [1, 2]) == 0

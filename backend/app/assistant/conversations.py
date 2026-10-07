@@ -21,7 +21,7 @@ from typing import Any, Literal
 from sqlalchemy import delete, func, inspect, select
 from sqlalchemy.orm import Session
 
-from app.storage.models import Conversation, Message
+from app.storage.models import Conversation, Feedback, Message
 
 Role = Literal["user", "assistant"]
 Mode = Literal["general", "notes"]
@@ -269,18 +269,29 @@ def forget_document_passages(session: Session, document_ids: Iterable[int]) -> i
     """Replace the answers that quoted these documents by a notice. The caller commits.
 
     The words of an answer can repeat a note, so removing a note from the library must remove them
-    here too. Messages are found through `cited_documents`, a plain column of document numbers.
+    wherever an answer was kept: in stored conversations, and in the marks the owner put on
+    answers. Both are found through `cited_documents`, a plain column of document numbers. What the
+    owner asked is theirs and stays.
     """
-    if not inspect(session.connection()).has_table("messages"):
-        return 0  # a library not upgraded yet has no conversations
+    tables = set(inspect(session.connection()).get_table_names())  # an older library has fewer
     scrubbed = 0
     for document_id in set(document_ids):
-        found = session.scalars(
-            select(Message).where(Message.cited_documents.like(f"%,{int(document_id)},%"))
-        ).all()
-        for message in found:
-            message.content = REMOVED_NOTICE
-            message.payload = json.dumps({"removed": True})
-            message.cited_documents = ""
-            scrubbed += 1
+        pattern = f"%,{int(document_id)},%"
+        if "messages" in tables:
+            for message in session.scalars(
+                select(Message).where(Message.cited_documents.like(pattern))
+            ):
+                message.content = REMOVED_NOTICE
+                message.payload = json.dumps({"removed": True})
+                message.cited_documents = ""
+                scrubbed += 1
+        if "feedback" in tables:
+            for mark in session.scalars(
+                select(Feedback).where(Feedback.cited_documents.like(pattern))
+            ):
+                mark.answer = REMOVED_NOTICE
+                mark.details = json.dumps({"removed": True})
+                mark.note = None  # it may have been written about the quoted text
+                mark.cited_documents = ""
+                scrubbed += 1
     return scrubbed
