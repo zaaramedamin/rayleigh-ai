@@ -13,6 +13,8 @@ from tests.fakes import FakeLLM
 PINNED = {
     "answer": (1, "6e8917b995"),
     "rewrite": (1, "fb7c7adac9"),
+    "summarize": (1, "52e3e2ad21"),
+    "combine": (1, "b322afcb5b"),
 }
 
 
@@ -45,8 +47,7 @@ def test_a_prompt_is_registered_under_its_own_name_with_a_positive_version() -> 
 
 def test_the_report_labels_say_which_version_of_which_prompt() -> None:
     assert versions() == {
-        "answer": f"v1 ({ANSWER.fingerprint})",
-        "rewrite": f"v1 ({REWRITE.fingerprint})",
+        name: f"v{version} ({fingerprint})" for name, (version, fingerprint) in PINNED.items()
     }
     assert ANSWER.label == f"answer v1 ({ANSWER.fingerprint})"
 
