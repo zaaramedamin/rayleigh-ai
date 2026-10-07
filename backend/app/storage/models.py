@@ -209,3 +209,29 @@ class Message(Base):
     # a document must find the answers that quoted it without decrypting every message.
     cited_documents: Mapped[str] = mapped_column(String(2000), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class Feedback(Base):
+    """The owner's mark on an answer, kept so a failure can become an evaluation question.
+
+    Everything in words is encrypted like note text. `cited_documents` holds only document numbers
+    (",12,40,") so that removing a document can find the marks that quoted it.
+    """
+
+    __tablename__ = "feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # helpful, not_helpful, wrong_source or missing_info.
+    kind: Mapped[str] = mapped_column(String(20))
+    mode: Mapped[str] = mapped_column(String(10))  # "notes" or "general"
+    question: Mapped[str] = mapped_column(EncryptedText("feedback.question"))
+    answer: Mapped[str] = mapped_column(EncryptedText("feedback.answer"))
+    # What the owner added in their own words, if anything.
+    note: Mapped[str | None] = mapped_column(EncryptedText("feedback.note"), default=None)
+    # What the interface knew about the answer (sources, why it was refused...), as JSON.
+    details: Mapped[str | None] = mapped_column(EncryptedText("feedback.details"), default=None)
+    cited_documents: Mapped[str] = mapped_column(String(2000), default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

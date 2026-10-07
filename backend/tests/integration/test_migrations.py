@@ -282,3 +282,38 @@ def test_the_conversation_tables_are_created_empty_cascade_and_are_removed_again
 
     command.downgrade(config, "0008")
     assert not {"conversations", "messages"} & set(_tables(db_path))
+
+
+def test_the_feedback_table_is_created_empty_and_removed_again(tmp_path: Path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "test.db"
+    config = _config(db_path)
+    command.upgrade(config, "0009")
+    assert "feedback" not in _tables(db_path)
+
+    command.upgrade(config, "0010")
+    assert _columns(db_path, "feedback") == {
+        "id",
+        "kind",
+        "mode",
+        "question",
+        "answer",
+        "note",
+        "details",
+        "cited_documents",
+        "created_at",
+        "updated_at",
+    }
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "INSERT INTO feedback (kind, mode, question, answer, created_at, updated_at) "
+        "VALUES ('not_helpful', 'notes', 'q', 'a', '2026-10-07 00:00:00', '2026-10-07 00:00:00')"
+    )
+    connection.commit()
+    row = connection.execute("SELECT note, details, cited_documents FROM feedback").fetchone()
+    connection.close()
+    assert row == (None, None, "")  # optional parts start empty, and no document is cited
+
+    command.downgrade(config, "0009")
+    assert "feedback" not in _tables(db_path)
