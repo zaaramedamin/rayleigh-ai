@@ -42,6 +42,13 @@ Try other settings without touching `.env`: `--chunk-size 500 --chunk-overlap 75
 - **unanswerable:** it was refused.
 - **injection:** the answer is right and the hidden instruction was ignored.
 
+**TASK MODES** (only with `--answers`). The summarize, compare and extract jobs (see [Summaries, comparisons and tables](../README.md#summaries-comparisons-and-tables)), run through the same code as the `/tasks` routes over the temporary library. `questions.json` has a `tasks` list with five of them: two summaries, a comparison of the two look-alike invoice notes, and two extractions. A job passes when:
+- every group of `answer_contains` appears in what it produced (for an extraction, the rows written as `item: value` lines) and no `answer_must_not_contain` phrase does;
+- every file in `expected_sources` is among the notes it cites (a summary cites nothing); and
+- for a comparison, it was not withheld for lack of a valid citation, and for an extraction, it produced at least one row.
+
+The report also has a line `prompts: answer v1 (6e8917b995), ...` with the version and fingerprint of every prompt used, and the JSON file has them under `settings.prompts`. When a score changes between two reports, that line says whether a prompt changed in between.
+
 ## Results measured on 2026-10-03
 
 Model `all-MiniLM-L6-v2` for search, `qwen3.5:4b` (4 billion parameters) for answers, default settings.
@@ -69,6 +76,19 @@ This was the main thing Step 11 was for.
 
 So `ANSWER_MIN_SCORE` stays at **0.30**: it keeps every answerable question, and it still removes clearly unrelated ones without calling the model. **Do not raise it to chase more refusals.** It would mostly refuse real questions.
 
+## The summarize, compare and extract jobs, measured on 2026-10-07
+
+Model `qwen3.5:4b` for the jobs. **Search used the test stand-in embedder, not `all-MiniLM-L6-v2`**: on that day Windows Smart App Control blocked a file of the machine-learning library the real embedder needs, so the relevance gate was opened (`min_score` 0) for the extractions. The jobs themselves ran for real.
+
+| Measure | Result |
+|---|---|
+| Summaries that kept the facts and invented none | **2 of 2** |
+| Comparison that kept the two years apart and cited both notes | **1 of 1** |
+| Extractions with the right rows and the right notes cited | **2 of 2** |
+| Time per job | median 10 s, longest 19 s |
+
+Five jobs are a smoke alarm, not a score: they show that a job is neither broken nor silently different from the one before, and they will notice a prompt change that loses a fact. Re-run `eval --answers` before and after changing a prompt in `prompts.py`.
+
 ## Limits of this evaluation
 
 - **It is small.** 37 questions on 12 short notes. One more or fewer correct answer moves a percentage by 3 to 4 points. Treat the results as a smoke alarm, not a precise score.
@@ -93,6 +113,20 @@ So `ANSWER_MIN_SCORE` stays at **0.30**: it keeps every answerable question, and
 ```
 
 `answer_contains` is a list of groups: every group must appear in the answer, and inside a group any one phrase is enough. For an unanswerable question use `"type": "unanswerable"` and leave out `expected_sources` and `answer_contains`. The file is checked when it loads, so a typo gives a clear error instead of a silent skip.
+
+A job goes in the `tasks` list of the same file (documents are names of files in `corpus/`):
+
+```json
+{
+  "id": "task-compare-invoices",
+  "mode": "compare",
+  "documents": ["invoices-2026.md", "invoices-2025.md"],
+  "expected_sources": ["invoices-2026.md", "invoices-2025.md"],
+  "answer_contains": [["lisbon"], ["madrid"], ["1,284.50"], ["2,150.00"]]
+}
+```
+
+`mode` is `summarize` (exactly one document), `compare` (two to four) or `extract` (no documents, but a `request` such as `"every invoice number with its total"`). The loader refuses a job it cannot run, with a message that names it.
 
 Keep real personal notes out of this folder: it is committed to git.
 
