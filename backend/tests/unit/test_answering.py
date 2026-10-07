@@ -15,6 +15,7 @@ from app.knowledge.answering.service import (
     answer_question,
     build_prompt,
     compose_answer,
+    format_notes,
     resolve_citations,
     resolve_markers,
     select_context,
@@ -508,3 +509,50 @@ def test_numbers_that_cannot_be_valid_however_they_are_written_are_removed() -> 
 
 def test_with_nothing_to_cite_every_marker_goes() -> None:
     assert resolve_markers("A claim [1] and [2].", 0) == ("A claim and.", set())
+
+
+# --- format_notes: the notes block, shared with the other tasks ------------------------------
+
+
+def test_every_note_is_numbered_and_fenced_with_the_random_value_and_its_source() -> None:
+    notes = [
+        note(1, text="First text.", source="a.md", heading="A > B"),
+        note(2, text="Second text.", source="b.pdf", heading=""),
+    ]
+
+    block = format_notes(notes, "0123456789abcdef")
+
+    assert block.count("0123456789abcdef") == 5  # announced once, then two lines for each note
+    assert "=== NOTE 1 BEGIN 0123456789abcdef ===\nSource: a.md > A > B\n\nFirst text.\n" in block
+    assert "=== NOTE 2 BEGIN 0123456789abcdef ===\nSource: b.pdf\n\nSecond text.\n" in block
+    assert block.index("NOTE 1 END") < block.index("NOTE 2 BEGIN")
+
+
+def test_a_note_from_a_pdf_names_its_page_and_a_long_note_is_cut() -> None:
+    pdf = RetrievedChunk(
+        citation_id="3:0",
+        document_id=3,
+        chunk_index=0,
+        score=0.8,
+        source="budget.pdf",
+        heading_path="",
+        start_line=1,
+        end_line=2,
+        text="x" * (MAX_CONTEXT_CHARS + 500),
+        start_page=4,
+        end_page=5,
+    )
+
+    block = format_notes([pdf], "0" * 16)
+
+    assert "Source: budget.pdf, pages 4-5" in block
+    assert block.count("x") == MAX_CONTEXT_CHARS
+
+
+def test_the_answer_prompt_is_this_block_followed_by_the_question() -> None:
+    notes = [note(1)]
+
+    system, user = build_prompt("  What is it?  ", notes, "0" * 16)
+
+    assert system == SYSTEM_PROMPT
+    assert user == f"{format_notes(notes, '0' * 16)}\n\nQuestion: What is it?"
