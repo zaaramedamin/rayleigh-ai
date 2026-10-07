@@ -27,8 +27,10 @@ from app.ai.embeddings.base import (
 )
 from app.ai.llm.base import LLMError, LLMUnavailableError
 from app.ai.speech.base import is_speech_model_downloaded
+from app.assistant.feedback import FAILURES, KINDS, count_by_kind, list_feedback
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
+from app.evaluation.candidates import DEFAULT_FILE, CandidatesFileError, export_candidates
 from app.evaluation.dataset import DatasetError, load_dataset
 from app.evaluation.network_guard import NetworkBlocked, NetworkGuard
 from app.evaluation.report import format_report, to_dict
@@ -381,6 +383,58 @@ def _cmd_ingest(_args: argparse.Namespace, settings: Settings) -> int:
         clear_legacy_sources(settings.data_dir)  # now recorded, encrypted, in the database
         _print_ingest_summary(summary)
         _index_after_changes(session, settings)
+    return 0
+
+
+FEEDBACK_LIST_LIMIT = 10
+_KIND_LABELS = {
+    "helpful": "helpful",
+    "not_helpful": "not helpful",
+    "wrong_source": "wrong source",
+    "missing_info": "missing information",
+}
+
+
+def _cmd_feedback(args: argparse.Namespace, settings: Settings) -> int:
+    """Show the marks you put on answers, or turn the failures into evaluation questions."""
+    engine = _open_engine(settings)
+    with Session(engine) as session:
+        if args.action == "export":
+            target = Path(args.to) if args.to else DEFAULT_FILE
+            try:
+                result = export_candidates(session, target)
+            except CandidatesFileError as exc:
+                raise CliError(str(exc)) from exc
+            if result.added:
+                print(f"added {result.added} evaluation question(s) to review in {result.path}")
+            else:
+                print("nothing new to add: every marked failure is already in the file.")
+            if result.kept:
+                print(f"already in the file, left as they were: {result.kept}")
+            if result.skipped_general:
+                print(
+                    f"{result.skipped_general} failure(s) on general chat were not added: the "
+                    "evaluation checks answers from your notes."
+                )
+            if result.added:
+                print(
+                    "Open the file, name the note that should answer each question "
+                    "(expected_sources) and say what a good answer contains (answer_contains), "
+                    "then copy the entries into the questions.json of your private evaluation set "
+                    "and run `python -m app eval --set <folder>`."
+                )
+            return 0
+        counts = count_by_kind(session)
+        if not any(counts.values()):
+            print("no marks yet. Mark an answer in the chat: helpful, not helpful, wrong source,")
+            print("or missing information.")
+            return 0
+        print("marks: " + ", ".join(f"{counts[k]} {_KIND_LABELS[k]}" for k in KINDS))
+        for mark in list_feedback(session, kinds=FAILURES, limit=FEEDBACK_LIST_LIMIT):
+            question = " ".join(mark.question.split())
+            question = question if len(question) <= 70 else question[:67] + "..."
+            print(f"  #{mark.id:<4} {_KIND_LABELS[mark.kind]:<19} {question}")
+        print("`python -m app feedback export` turns the failures into evaluation questions.")
     return 0
 
 
@@ -1038,6 +1092,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--superseded",
         action="store_true",
         help="also remove older versions of files that were edited",
+    )
+    feedback = add(
+        "feedback",
+        _cmd_feedback,
+        "see your marks on answers, or turn the failures into evaluation questions",
+    )
+    feedback.add_argument(
+        "action",
+        nargs="?",
+        choices=("list", "export"),
+        default="list",
+        help="list the marks (default), or export the failures as evaluation questions",
+    )
+    feedback.add_argument(
+        "--to",
+        metavar="FILE",
+        help="where export writes (default: eval-private/feedback-candidates.json)",
     )
     add("rechunk", _cmd_rechunk, "rebuild all chunks (after changing chunk settings)")
     index = add("index", _cmd_index, "embed documents that are not searchable yet")
