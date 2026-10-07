@@ -11,6 +11,7 @@ owner allows it, what the Profile page says about them and what it was asked to 
 (app.assistant.actions); every such request is validated before anything happens.
 """
 
+import json
 import logging
 import secrets
 from collections.abc import Callable, Sequence
@@ -18,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from app.ai.llm.base import ChatMessage, LLMProvider
+from app.ai.llm.budget import history_room, input_chars
 from app.assistant.actions import REMEMBER, Action, confirmation, tool_specs, validate_calls
 from app.assistant.identity import Identity
 from app.assistant.memory import memories_for_prompt
@@ -168,14 +170,19 @@ def select_history(
     return kept
 
 
-def build_messages(message: str, history: Sequence[ChatMessage] = ()) -> list[ChatMessage]:
-    """The conversation to send: recent history, then the new message. Raises ValueError."""
+def clean_message(message: str) -> str:
+    """The message as it will be sent. Raises ValueError if it is empty or too long."""
     text = message.strip()
     if not text:
         raise ValueError("the message is empty")
     if len(text) > MAX_MESSAGE_CHARS:
         raise ValueError(f"the message is longer than {MAX_MESSAGE_CHARS} characters")
-    return [*select_history(history), ChatMessage("user", text)]
+    return text
+
+
+def build_messages(message: str, history: Sequence[ChatMessage] = ()) -> list[ChatMessage]:
+    """The conversation to send: recent history, then the new message. Raises ValueError."""
+    return [*select_history(history), ChatMessage("user", clean_message(message))]
 
 
 def reply_to(
@@ -192,7 +199,7 @@ def reply_to(
     `remember` saves a fact the model asks to keep; without it the model is not offered that.
     """
     context = context or AssistantContext(can_act=False)
-    messages = build_messages(message, history)
+    asked = clean_message(message)
     tools = tool_specs(with_memory=remember is not None) if context.can_act else []
     system = system_prompt(
         today or date.today(),
@@ -200,6 +207,15 @@ def reply_to(
         can_remember=remember is not None,
         nonce=secrets.token_hex(8),
     )
+    # Keep the prompt inside the model's window (app.ai.llm.budget). The instructions, the tool
+    # descriptions and the new message are never cut; earlier turns take the room that is left, and
+    # the oldest go first. Without this the model would silently lose the start of the prompt.
+    limit: int = getattr(llm, "input_chars", input_chars())
+    fixed = len(system) + sum(
+        len(tool.name) + len(tool.description) + len(json.dumps(tool.parameters)) for tool in tools
+    )
+    room = history_room(limit, fixed, len(asked))
+    messages = [*select_history(history, min(MAX_HISTORY_CHARS, room)), ChatMessage("user", asked)]
     reply = llm.chat(system, messages, temperature=TEMPERATURE, tools=tools)
 
     offered = {tool.name for tool in tools}
