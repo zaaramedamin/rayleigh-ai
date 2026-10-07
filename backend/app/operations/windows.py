@@ -178,3 +178,38 @@ def scikit_learn_loads() -> bool | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return done.returncode == 0
+
+
+def embedding_library_loads() -> tuple[bool | None, str]:
+    """Can the library that turns text into vectors be loaded here?
+
+    Asked in a separate process, so nothing changes in this one, and by loading it the way the
+    application does (including the scikit-learn placeholder). Returns (True, "") when it loads,
+    (False, reason) with the last line of the error when it does not, and (None, "") when it could
+    not be asked. Without it nothing can be searched or answered from the notes, which is why the
+    doctor asks.
+    """
+    program = (
+        "from app.ai.embeddings.compat import import_sentence_transformer; "
+        "import_sentence_transformer()"
+    )
+    package_root = Path(__file__).resolve().parents[2]  # the folder that holds the `app` package
+    no_window = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", program],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            check=False,
+            cwd=package_root,
+            creationflags=no_window,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, ""
+    if done.returncode == 0:
+        return True, ""
+    lines = [line.strip() for line in done.stderr.splitlines() if line.strip()]
+    return False, (lines[-1] if lines else "it could not be imported")[:300]

@@ -287,3 +287,69 @@ def test_scikit_learn_that_loads_is_reported_so_and_a_failure_to_ask_is_not_a_no
 
     monkeypatch.setattr(windows.subprocess, "run", slow)
     assert windows.scikit_learn_loads() is None
+
+
+# --- the library that turns text into vectors ------------------------------------------------
+
+
+def run_returning(stderr: str = "", code: int = 0) -> object:
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        run.seen = (command, kwargs)  # type: ignore[attr-defined]
+        return subprocess.CompletedProcess(command, code, stdout="", stderr=stderr)
+
+    return run
+
+
+def test_the_embedding_library_is_loaded_the_way_the_application_loads_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = run_returning()
+    monkeypatch.setattr(windows.subprocess, "run", run)
+
+    assert windows.embedding_library_loads() == (True, "")
+
+    command, kwargs = run.seen  # type: ignore[attr-defined]
+    assert command[0] == sys.executable and command[1] == "-c"
+    assert "import_sentence_transformer()" in command[2]  # with the scikit-learn placeholder
+    assert (Path(str(kwargs["cwd"])) / "app" / "__init__.py").is_file()  # where `app` can be found
+
+
+def test_a_library_that_cannot_be_loaded_gives_the_last_line_of_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace = (
+        "Traceback (most recent call last):\n"
+        '  File "<string>", line 1, in <module>\n'
+        "ImportError: DLL load failed while importing _C: An Application Control policy has "
+        "blocked this file.\n\n"
+    )
+    monkeypatch.setattr(windows.subprocess, "run", run_returning(trace, code=1))
+
+    loads, reason = windows.embedding_library_loads()
+
+    assert loads is False
+    assert reason == (
+        "ImportError: DLL load failed while importing _C: An Application Control policy has "
+        "blocked this file."
+    )
+
+
+def test_a_failure_with_no_message_and_a_very_long_one_are_both_handled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(windows.subprocess, "run", run_returning("", code=1))
+    assert windows.embedding_library_loads() == (False, "it could not be imported")
+
+    monkeypatch.setattr(windows.subprocess, "run", run_returning("E" * 900, code=1))
+    assert len(windows.embedding_library_loads()[1]) == 300
+
+
+def test_an_embedding_library_that_could_not_be_asked_about_is_not_called_broken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def slow(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired("python", 180)
+
+    monkeypatch.setattr(windows.subprocess, "run", slow)
+
+    assert windows.embedding_library_loads() == (None, "")
