@@ -8,6 +8,7 @@ real search or computer.
 from app.agent.builtin import Searcher, calculator_tool, current_time_tool, search_notes_tool
 from app.agent.open_tools import Launcher, Opener, open_app_tool, open_path_tool
 from app.agent.tools import ToolRegistry
+from app.agent.web_tool import Requester, Resolver, fetch_web_page_tool
 
 
 def default_registry(
@@ -16,12 +17,16 @@ def default_registry(
     min_score: float,
     opener: Opener | None = None,
     launcher: Launcher | None = None,
+    resolver: Resolver | None = None,
+    requester: Requester | None = None,
 ) -> ToolRegistry:
     """Every tool the agent has. Without a `search`, the agent has no notes to look in. Without an
-    `opener` or `launcher` the tools that open things use the real ones."""
+    `opener`, `launcher`, `resolver` or `requester`, the tools that open things and read the web use
+    the real ones."""
     registry = ToolRegistry([calculator_tool(), current_time_tool()])
     if search is not None:
         registry.add(search_notes_tool(search, min_score))
     registry.add(open_path_tool(opener) if opener else open_path_tool())
     registry.add(open_app_tool(launcher) if launcher else open_app_tool())
+    registry.add(fetch_web_page_tool(resolver, requester))
     return registry

@@ -322,10 +322,10 @@ def fetch_page(
 
 
 def fetch_web_page_tool(
-    resolver: Resolver = _real_resolver, requester: Requester = real_requester
+    resolver: Resolver | None = None, requester: Requester | None = None
 ) -> Tool:
     def run(args: Mapping[str, Any]) -> str:
-        return fetch_page(args["url"], resolver, requester)
+        return fetch_page(args["url"], resolver or _real_resolver, requester or real_requester)
 
     return Tool(
         name="fetch_web_page",
