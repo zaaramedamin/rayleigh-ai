@@ -531,3 +531,18 @@ def test_reading_the_log_closes_the_tasks_a_crash_left_unfinished(
     command(make_env(session, tmp_path, screen), "log")
 
     assert any("run_finished" in line and "interrupted" in line for line in screen.lines)
+
+
+def test_a_task_started_from_the_command_line_is_given_the_facts_about_the_computer(
+    session: Session, tmp_path: Path
+) -> None:
+    switched_on(tmp_path)
+    model = ScriptedModel(says("ok"))
+    env = make_env(session, tmp_path, Screen(), model)
+    env.context = lambda: "About this computer:\n- Home: C:/Users/me."
+
+    command(env, "run", "open", "my", "documents")
+
+    assert model.chats[0][1][0].content == (
+        "About this computer:\n- Home: C:/Users/me.\n\nThe user's request:\nopen my documents"
+    )

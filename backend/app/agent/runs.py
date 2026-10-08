@@ -78,6 +78,7 @@ class RunManager:
         make_llm: Callable[[], LLMProvider],
         make_registry: Callable[[], ToolRegistry],
         load_grants: Callable[[], Grants],
+        make_context: Callable[[], str] | None = None,
         limits: Limits | None = None,
         question_wait: float = QUESTION_WAIT_SECONDS,
     ) -> None:
@@ -85,6 +86,7 @@ class RunManager:
         self._make_llm = make_llm
         self._make_registry = make_registry
         self._load_grants = load_grants
+        self._make_context = make_context
         self._limits = limits
         self._question_wait = question_wait
         self._changed = threading.Condition()
@@ -233,6 +235,7 @@ class RunManager:
                     run_id=run_id,
                     stop=self._stops[run_id],
                     progress=lambda text: self._say(run_id, text),
+                    context=self._make_context() if self._make_context else "",
                 )
         except Exception as exc:  # noqa: BLE001 - nothing may leave a run hanging
             logger.error("an agent run ended with an error type=%s", type(exc).__name__)

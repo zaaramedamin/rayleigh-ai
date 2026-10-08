@@ -482,3 +482,19 @@ def test_an_answer_nobody_picked_up_does_not_leak_into_the_next_task(
     finished(m, run_id)
 
     assert run_id not in m._answers  # noqa: SLF001
+
+
+def test_the_facts_about_the_computer_are_given_to_every_task(
+    make_session: Callable[[], Session],
+) -> None:
+    model = ScriptedModel(says("ok"))
+    m = manager(
+        make_session,
+        model,
+        make_context=lambda: "About this computer:\n- The user's Downloads folder is C:/D.",
+    )
+
+    finished(m, m.start("open my downloads").run_id)
+
+    assert model.chats[0][1][0].content.endswith("The user's request:\nopen my downloads")
+    assert "C:/D." in model.chats[0][1][0].content

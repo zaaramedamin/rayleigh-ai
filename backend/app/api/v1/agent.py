@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.agent import audit
 from app.agent.audit import AuditError
 from app.agent.console import LEVEL_WORDS, LazySearch
+from app.agent.context import describe_computer
 from app.agent.loop import MAX_GOAL_CHARS, Question
 from app.agent.permissions import Grants, load_grants, save_grants
 from app.agent.registry import default_registry
@@ -28,6 +29,7 @@ from app.agent.runs import (
 from app.api.deps import SessionDep, SettingsDep, _engine, locked_vector_store
 from app.core.config import Settings
 from app.knowledge.components import create_llm, load_embedder
+from app.knowledge.library.folders import allowed_folders
 from app.knowledge.retrieval.service import RetrievedChunk, retrieve
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,9 @@ def build_manager(settings: Settings) -> RunManager:
         make_llm=lambda: create_llm(settings),
         make_registry=lambda: default_registry(search=search, min_score=settings.answer_min_score),
         load_grants=lambda: load_grants(settings.data_dir),
+        make_context=lambda: describe_computer(
+            notes_folders=[folder.path for folder in allowed_folders(settings)]
+        ),
     )
 
 

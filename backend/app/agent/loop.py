@@ -50,6 +50,7 @@ from app.knowledge.answering.prompts import AGENT
 logger = logging.getLogger(__name__)
 
 MAX_GOAL_CHARS = 2000
+MAX_CONTEXT_CHARS = 2000
 TEMPERATURE = 0.0
 
 Status = Literal["done", "stopped", "failed"]
@@ -119,6 +120,15 @@ class _Finish(Exception):
 
 def _spec_chars(spec: ToolSpec) -> int:
     return len(spec.name) + len(spec.description) + len(json.dumps(spec.parameters))
+
+
+def first_message(goal: str, context: str = "") -> str:
+    """What the model is first told: the facts it may use, then the request, last, so it is what the
+    model answers."""
+    facts = context.strip()[:MAX_CONTEXT_CHARS]
+    if not facts:
+        return goal
+    return f"{facts}\n\nThe user's request:\n{goal}"
 
 
 def fit_messages(messages: Sequence[ChatMessage], room: int) -> list[ChatMessage]:
@@ -419,8 +429,8 @@ class _Run:
 
     # --- the run -----------------------------------------------------------------------------
 
-    def execute(self, goal: str) -> RunResult:
-        self.messages.append(ChatMessage("user", goal))
+    def execute(self, goal: str, context: str = "") -> RunResult:
+        self.messages.append(ChatMessage("user", first_message(goal, context)))
         try:
             while True:
                 self.check_limits()
@@ -479,6 +489,7 @@ def run_agent(
     stop: threading.Event | None = None,
     clock: Callable[[], float] = time.monotonic,
     progress: Callable[[str], None] | None = None,
+    context: str = "",
 ) -> RunResult:
     """Carry out `goal`. Raises ValueError for an empty or too long goal.
 
@@ -508,7 +519,7 @@ def run_agent(
             return run.finish(
                 "failed", "The agent is switched off. Switch it on in the settings first."
             )
-        return run.execute(task)
+        return run.execute(task, context)
     except AuditError:
         logger.error("the agent stopped because its log could not be written")
         return RunResult(

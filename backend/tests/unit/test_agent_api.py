@@ -521,3 +521,16 @@ def test_a_log_that_cannot_be_tidied_does_not_stop_the_agent_from_starting(
     monkeypatch.setattr(agent_module.audit, "close_unfinished_runs", broken)
 
     assert isinstance(agent_module.build_manager(make_settings()), RunManager)
+
+
+def test_the_real_manager_tells_the_agent_where_the_notes_folders_are(
+    make_settings: Callable[..., Settings], tmp_path: Path
+) -> None:
+    notes = tmp_path / "my-notes"
+    notes.mkdir()
+    manager = agent_module.build_manager(make_settings(allowed_folders=[notes]))
+
+    facts = manager._make_context()  # noqa: SLF001 - checking what the wiring builds
+
+    assert f"- The user's notes are in: {notes}." in facts
+    assert "never invent a path" in facts and "home folder is" in facts

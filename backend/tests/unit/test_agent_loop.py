@@ -858,3 +858,59 @@ def test_a_task_that_ended_normally_is_not_closed_twice(session: Session) -> Non
     result = go(session, ScriptedModel(says("done")), Machine())
 
     assert kinds(session, result.run_id).count("run_finished") == 1
+
+
+# --- what the model is first told -------------------------------------------------------------
+
+
+def test_the_facts_about_the_computer_come_first_and_the_request_last(session: Session) -> None:
+    model = ScriptedModel(says("ok"))
+
+    go(
+        session,
+        model,
+        Machine(),
+        goal="open my downloads folder",
+        context="About this computer:\n- The user's Downloads folder is C:/Users/me/Downloads.",
+    )
+
+    first = model.chats[0][1][0].content
+    assert first == (
+        "About this computer:\n- The user's Downloads folder is C:/Users/me/Downloads."
+        "\n\nThe user's request:\nopen my downloads folder"
+    )
+    assert first.endswith("open my downloads folder")  # the request is what the model answers
+
+
+def test_without_facts_the_model_is_told_just_the_request(session: Session) -> None:
+    model = ScriptedModel(says("ok"))
+
+    go(session, model, Machine(), goal="say hi", context="   ")
+
+    assert model.chats[0][1][0].content == "say hi"
+
+
+def test_the_facts_are_limited_so_they_cannot_crowd_out_the_request(session: Session) -> None:
+    from app.agent.loop import MAX_CONTEXT_CHARS
+
+    model = ScriptedModel(says("ok"))
+
+    go(session, model, Machine(), goal="say hi", context="f" * (MAX_CONTEXT_CHARS * 3))
+
+    first = model.chats[0][1][0].content
+    assert first.count("f") == MAX_CONTEXT_CHARS and first.endswith("say hi")
+
+
+def test_the_log_holds_the_request_and_never_the_facts_about_the_computer(
+    session: Session,
+) -> None:
+    result = go(
+        session,
+        ScriptedModel(says("ok")),
+        Machine(),
+        goal="say hi",
+        context="- The user's home folder is C:/Users/Quillon-Marmalade-4821.",
+    )
+
+    logged = " ".join(e.detail or "" for e in run_events(session, result.run_id))
+    assert "say hi" in logged and "Quillon-Marmalade-4821" not in logged

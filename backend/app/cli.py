@@ -25,6 +25,7 @@ from app.agent.console import (
     LazySearch,
     agent_command,
 )
+from app.agent.context import describe_computer
 from app.agent.tools import ToolError
 from app.ai.embeddings.base import (
     EmbeddingProvider,
@@ -837,6 +838,9 @@ def _cmd_agent(args: argparse.Namespace, settings: Settings) -> int:
             min_score=settings.answer_min_score,
             progress=lambda text: print(f"  {text}", file=sys.stderr, flush=True),
             input_fn=lambda prompt: input(prompt),
+            context=lambda: describe_computer(
+                notes_folders=[folder.path for folder in allowed_folders(settings)]
+            ),
         )
         try:
             return agent_command(

@@ -166,6 +166,7 @@ class Environment:
     emit: Callable[[str], None] = print
     progress: Callable[[str], None] | None = None
     input_fn: Callable[[str], str] = input
+    context: Callable[[], str] | None = None  # the facts about this computer
 
 
 def _registry(env: Environment) -> ToolRegistry:
@@ -318,6 +319,7 @@ def _run(env: Environment, words: list[str]) -> int:
             task,
             limits=Limits(),
             progress=env.progress,
+            context=env.context() if env.context else "",
         )
     except (ValueError, LLMError, AuditError) as exc:
         raise ConsoleError(str(exc)) from exc
