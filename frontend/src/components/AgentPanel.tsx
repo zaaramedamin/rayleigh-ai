@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { AgentQuestion, AgentRun, Api } from "../api/types";
 import {
@@ -24,8 +24,16 @@ function QuestionCard({
   onAnswer: (choice: string) => void;
 }) {
   const warning = readWarning(question);
+  const card = useRef<HTMLElement>(null);
+  // A question the owner cannot see is no question: bring it into view and give it the keyboard.
+  useEffect(() => {
+    card.current?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    card.current?.focus({ preventScroll: true });
+  }, [question.id]);
   return (
     <section
+      ref={card}
+      tabIndex={-1}
       className={`agent-card agent-card--${question.kind}`}
       role="alertdialog"
       aria-label={question.title}

@@ -1980,6 +1980,10 @@
   border-radius: var(--radius-sm);
   background: rgba(240, 176, 74, 0.08);
 }
+.agent-card:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent), 0 0 24px rgba(240, 176, 74, 0.25);
+}
 .agent-card--problem {
   border-color: var(--danger);
   background: rgba(242, 86, 106, 0.08);
