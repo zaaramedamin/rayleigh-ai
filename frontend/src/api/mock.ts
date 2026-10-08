@@ -1,5 +1,9 @@
 import { ApiError } from "./client";
 import type {
+  AgentEvent,
+  AgentRun,
+  AgentSettings,
+  AgentToolInfo,
   Api,
   AskResponse,
   AssistantIdentity,
@@ -153,6 +157,47 @@ export function createMockApi(): Api {
   // Marks on answers are kept in memory only, like everything else in the demo.
   let marks: FeedbackMark[] = [];
   let nextMarkId = 1;
+
+  // The demo agent: nothing is really opened or fetched. A task that mentions "open" asks for approval
+  // first, as the real one does; any other task finishes by itself.
+  const DEMO_TOOLS: AgentToolInfo[] = [
+    { name: "calculator", description: "Calculate an arithmetic expression exactly.", level: "read_local", what_it_does: "only reads", enabled: false },
+    { name: "current_time", description: "The current date and time on this computer.", level: "read_local", what_it_does: "only reads", enabled: false },
+    { name: "search_notes", description: "Search the saved notes and documents.", level: "read_local", what_it_does: "only reads", enabled: false },
+    { name: "open_path", description: "Open a file or a folder with its usual program.", level: "open_local", what_it_does: "opens things, asks every time", enabled: false },
+    { name: "open_app", description: "Start Notepad, Calculator, Paint or File Explorer.", level: "open_local", what_it_does: "opens things, asks every time", enabled: false },
+    { name: "fetch_web_page", description: "Read the text of one public web page.", level: "external_read", what_it_does: "reads the web, asks every time", enabled: false },
+  ];
+  const agent = { enabled: false, web: false, tools: DEMO_TOOLS };
+  const runs = new Map<string, AgentRun>();
+  let agentEvents: AgentEvent[] = [];
+  let nextRun = 1;
+  let nextQuestion = 1;
+  const record = (run: AgentRun, kind: string, fields: Partial<AgentEvent> = {}) => {
+    agentEvents = [
+      ...agentEvents,
+      {
+        id: agentEvents.length + 1,
+        time: new Date().toISOString(),
+        run_id: run.run_id,
+        step: run.model_turns,
+        kind,
+        tool: null,
+        level: null,
+        decision: null,
+        decided_by: null,
+        detail: null,
+        ...fields,
+      },
+    ];
+  };
+  const finishRun = (run: AgentRun, status: AgentRun["status"], answer: string) => {
+    run.status = status;
+    run.answer = answer;
+    run.question = null;
+    run.finished_at = new Date().toISOString();
+    record(run, "run_finished", { detail: `${status}: ${answer}` });
+  };
   const findConversation = (id: number): ConversationDetail => {
     const found = conversations.find((c) => c.id === id);
     if (!found) throw new ApiError("not_found", "That conversation does not exist.", 404);
@@ -467,6 +512,121 @@ export function createMockApi(): Api {
       const count = conversations.length;
       conversations = [];
       return count;
+    },
+
+    agentSettings: async (): Promise<AgentSettings> => {
+      await wait(120);
+      const active = [...runs.values()].find((r) => r.status === "running" || r.status === "waiting") ?? null;
+      return { enabled: agent.enabled, web: agent.web, tools: agent.tools.map((t) => ({ ...t })), active_run: active && structuredClone(active) };
+    },
+    changeAgent: async (change): Promise<AgentSettings> => {
+      await wait(120);
+      if (change.enabled !== undefined) agent.enabled = change.enabled;
+      if (change.web !== undefined) agent.web = change.web;
+      if (change.tools) {
+        const unknown = change.tools.filter((n) => !agent.tools.some((t) => t.name === n));
+        if (unknown.length) throw new Error(`No such tool: ${unknown.join(", ")}.`);
+        agent.tools = agent.tools.map((t) => ({ ...t, enabled: change.tools!.includes(t.name) }));
+      }
+      const active = [...runs.values()].find((r) => r.status === "running" || r.status === "waiting") ?? null;
+      return { enabled: agent.enabled, web: agent.web, tools: agent.tools.map((t) => ({ ...t })), active_run: active && structuredClone(active) };
+    },
+    startAgentRun: async (task): Promise<AgentRun> => {
+      await wait(150);
+      if (!agent.enabled) throw new ApiError("conflict", "The agent is switched off. Switch it on in the settings first.", 409);
+      if ([...runs.values()].some((r) => r.status === "running" || r.status === "waiting")) {
+        throw new ApiError("conflict", "The agent is already working on a task. Wait for it or stop it.", 409);
+      }
+      const text = task.split(/\s+/).filter(Boolean).join(" ");
+      if (!text) throw new ApiError("invalid", "Say what the agent should do.", 422);
+      const run: AgentRun = {
+        run_id: `demo${String(nextRun++).padStart(4, "0")}`,
+        task: text,
+        status: "running",
+        answer: "",
+        started_at: new Date().toISOString(),
+        finished_at: null,
+        progress: ["thinking ..."],
+        question: null,
+        steps: [],
+        model_turns: 1,
+      };
+      runs.set(run.run_id, run);
+      record(run, "run_started", { detail: text });
+      if (/\bopen\b/i.test(text) && agent.tools.some((t) => t.name === "open_path" && t.enabled)) {
+        setTimeout(() => {
+          if (run.status !== "running") return;
+          const path = "C:\\Demo\\notes\\plan.txt";
+          record(run, "request", { tool: "open_path", detail: JSON.stringify({ path }) });
+          record(run, "decision", { tool: "open_path", level: "open_local", decision: "ask", decided_by: "policy" });
+          run.status = "waiting";
+          run.question = {
+            id: nextQuestion++,
+            kind: "approve",
+            title: "Allow open_path?",
+            message: `Open ${path} with the program Windows uses for it`,
+            options: ["allow", "deny", "stop"],
+            tool: "open_path",
+            arguments: { path },
+            effect: `Open ${path} with the program Windows uses for it`,
+            reason: "This opens something on your computer, so I need your approval each time.",
+            read_sources: [],
+          };
+        }, 700);
+      } else {
+        setTimeout(() => {
+          if (run.status !== "running") return;
+          run.progress.push("done");
+          finishRun(run, "done", `Demo: I would carry out "${text}" here. Nothing was changed.`);
+        }, 1200);
+      }
+      return structuredClone(run);
+    },
+    agentRun: async (runId): Promise<AgentRun> => {
+      await wait(80);
+      const run = runs.get(runId);
+      if (!run) throw new ApiError("not_found", "There is no such task.", 404);
+      return structuredClone(run);
+    },
+    answerAgent: async (runId, questionId, choice): Promise<void> => {
+      await wait(100);
+      const run = runs.get(runId);
+      if (!run) throw new ApiError("not_found", "There is no such task.", 404);
+      const question = run.question;
+      if (!question || question.id !== questionId) throw new ApiError("conflict", "That question is no longer waiting for an answer.", 409);
+      if (!question.options.includes(choice)) throw new ApiError("invalid", `The answer must be one of: ${question.options.join(", ")}`, 422);
+      record(run, "approval", { tool: question.tool, decision: choice === "allow" ? "allow" : "deny", decided_by: "owner", detail: choice });
+      run.question = null;
+      if (choice === "stop") return finishRun(run, "stopped", "You stopped the task.");
+      run.status = "running";
+      if (choice === "deny") {
+        run.steps.push({ tool: question.tool ?? "", effect: question.effect, outcome: "not allowed by you" });
+        setTimeout(() => finishRun(run, "done", "You did not allow that, so I did not open it."), 500);
+        return;
+      }
+      run.progress.push(`running: ${question.effect}`);
+      setTimeout(() => {
+        run.steps.push({ tool: question.tool ?? "", effect: question.effect, outcome: "done" });
+        record(run, "result", { tool: question.tool, detail: "Demo: nothing was really opened." });
+        finishRun(run, "done", "Demo: I would have opened it now. Nothing was really opened.");
+      }, 700);
+    },
+    stopAgentRun: async (runId): Promise<void> => {
+      await wait(80);
+      const run = runs.get(runId);
+      if (!run) throw new ApiError("not_found", "There is no such task.", 404);
+      if (run.status !== "running" && run.status !== "waiting") throw new ApiError("conflict", "That task has already finished.", 409);
+      finishRun(run, "stopped", "You stopped the task.");
+    },
+    agentLog: async (runId, limit = 50): Promise<AgentEvent[]> => {
+      await wait(100);
+      return runId ? agentEvents.filter((e) => e.run_id === runId).slice(0, limit) : [...agentEvents].reverse().slice(0, limit);
+    },
+    eraseAgentLog: async (): Promise<number> => {
+      await wait(100);
+      const erased = agentEvents.length;
+      agentEvents = [];
+      return erased;
     },
 
     addFeedback: async (mark) => {

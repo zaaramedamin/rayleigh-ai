@@ -213,6 +213,87 @@ export interface Summary {
   truncated: boolean;
 }
 
+/** How much a tool can do. Anything above "read_local" asks you every time. */
+export type AgentLevel = "read_local" | "open_local" | "external_read" | "write_local" | "destructive";
+
+export interface AgentToolInfo {
+  name: string;
+  description: string;
+  level: AgentLevel;
+  /** In plain words: "only reads", "opens things, asks every time". */
+  what_it_does: string;
+  enabled: boolean;
+}
+
+/** What a task asks you when it cannot go on without you: approve an action, or something went wrong. */
+export interface AgentQuestion {
+  /** Send it back with the answer, so an answer to an old question is refused. */
+  id: number;
+  kind: "approve" | "problem";
+  title: string;
+  message: string;
+  /** The only answers that mean anything: allow, deny, stop, retry, skip or continue. */
+  options: string[];
+  tool: string | null;
+  /** The exact arguments, as checked. */
+  arguments: Record<string, unknown>;
+  effect: string;
+  reason: string;
+  /** Tools whose results the model has read so far in this task. */
+  read_sources: string[];
+}
+
+export interface AgentStep {
+  tool: string;
+  effect: string;
+  outcome: string;
+}
+
+export type AgentRunStatus = "running" | "waiting" | "done" | "stopped" | "failed";
+
+export interface AgentRun {
+  run_id: string;
+  task: string;
+  status: AgentRunStatus;
+  answer: string;
+  started_at: string;
+  finished_at: string | null;
+  progress: string[];
+  question: AgentQuestion | null;
+  steps: AgentStep[];
+  model_turns: number;
+}
+
+export interface AgentSettings {
+  enabled: boolean;
+  web: boolean;
+  tools: AgentToolInfo[];
+  /** The task that is running now, if any. */
+  active_run: AgentRun | null;
+}
+
+/** Only the fields sent are changed. */
+export interface AgentSettingsChange {
+  enabled?: boolean;
+  web?: boolean;
+  /** The tools to have switched on. */
+  tools?: string[];
+}
+
+/** One entry of the record of everything the agent was asked to do. */
+export interface AgentEvent {
+  id: number;
+  time: string;
+  run_id: string;
+  step: number;
+  kind: string;
+  tool: string | null;
+  level: string | null;
+  decision: string | null;
+  decided_by: string | null;
+  detail: string | null;
+}
+
 /** One passage a document was cut into. */
 export interface ChunkInfo {
   index: number;
@@ -449,6 +530,18 @@ export interface Api {
   addMessages(id: number, messages: NewStoredMessage[]): Promise<ConversationInfo>;
   deleteConversation(id: number): Promise<void>;
   deleteConversations(): Promise<number>;
+
+  agentSettings(): Promise<AgentSettings>;
+  changeAgent(change: AgentSettingsChange): Promise<AgentSettings>;
+  /** Start a task. It runs in the background: watch it with agentRun. */
+  startAgentRun(task: string): Promise<AgentRun>;
+  agentRun(runId: string): Promise<AgentRun>;
+  /** Answer the question a task is waiting on, with one of its options. */
+  answerAgent(runId: string, questionId: number, choice: string): Promise<void>;
+  stopAgentRun(runId: string): Promise<void>;
+  agentLog(runId?: string, limit?: number): Promise<AgentEvent[]>;
+  /** Erase the whole log; says how many entries went. */
+  eraseAgentLog(): Promise<number>;
 
   addFeedback(mark: NewFeedback): Promise<FeedbackMark>;
   changeFeedback(id: number, kind: FeedbackKind, note?: string | null): Promise<FeedbackMark>;

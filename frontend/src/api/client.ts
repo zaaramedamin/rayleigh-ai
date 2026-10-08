@@ -1,4 +1,7 @@
 import type {
+  AgentEvent,
+  AgentRun,
+  AgentSettings,
   Api,
   AskResponse,
   AssistantIdentity,
@@ -232,6 +235,21 @@ export function createApi(base = "/api/v1", hooks?: AuthHooks): Api {
     addMessages: (id, messages: NewStoredMessage[]) => call<ConversationInfo>(`/conversations/${id}/messages`, json({ messages })),
     deleteConversation: (id) => call<void>(`/conversations/${id}`, { method: "DELETE" }),
     deleteConversations: async () => (await call<{ deleted: number }>("/conversations", { method: "DELETE" })).deleted,
+
+    agentSettings: () => call<AgentSettings>("/agent"),
+    changeAgent: (change) => call<AgentSettings>("/agent", { method: "PUT", body: JSON.stringify(change) }),
+    startAgentRun: (task) => call<AgentRun>("/agent/runs", json({ task })),
+    agentRun: (runId) => call<AgentRun>(`/agent/runs/${encodeURIComponent(runId)}`),
+    answerAgent: (runId, questionId, choice) =>
+      call<void>(`/agent/runs/${encodeURIComponent(runId)}/answer`, json({ question_id: questionId, choice })),
+    stopAgentRun: (runId) => call<void>(`/agent/runs/${encodeURIComponent(runId)}/stop`, { method: "POST" }),
+    agentLog: async (runId, limit = 50) =>
+      (
+        await call<{ events: AgentEvent[] }>(
+          `/agent/log?${new URLSearchParams({ limit: String(limit), ...(runId ? { run_id: runId } : {}) })}`,
+        )
+      ).events,
+    eraseAgentLog: async () => (await call<{ erased: number }>("/agent/log", { method: "DELETE" })).erased,
 
     addFeedback: (mark: NewFeedback) => call<FeedbackMark>("/feedback", json(mark)),
     changeFeedback: (id: number, kind: FeedbackKind, note?: string | null) =>
