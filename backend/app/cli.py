@@ -18,6 +18,14 @@ from pydantic import ValidationError
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
+from app.agent.console import (
+    ACTIONS,
+    ConsoleError,
+    Environment,
+    LazySearch,
+    agent_command,
+)
+from app.agent.tools import ToolError
 from app.ai.embeddings.base import (
     EmbeddingProvider,
     EmbeddingRuntimeError,
@@ -805,6 +813,46 @@ def _cmd_extract(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _cmd_agent(args: argparse.Namespace, settings: Settings) -> int:
+    """Let the assistant carry out a task by itself, within what you allow, and see what it did."""
+    engine = _open_engine(settings)
+
+    def load_embedder() -> EmbeddingProvider:
+        try:
+            return _load_embedder(settings)
+        except CliError as exc:
+            raise ToolError(str(exc)) from exc
+
+    def retrieve_notes(embedder: EmbeddingProvider, query: str, count: int) -> list[RetrievedChunk]:
+        # A tool runs in its own thread, so the search opens its own session.
+        with Session(engine) as own, _open_store(settings, embedder) as store:
+            return retrieve(own, embedder, store, query, top_k=count, mode=settings.search_mode)
+
+    with Session(engine) as session:
+        env = Environment(
+            data_dir=settings.data_dir,
+            session=session,
+            make_llm=lambda: create_llm(settings),
+            search=LazySearch(load_embedder, retrieve_notes),
+            min_score=settings.answer_min_score,
+            progress=lambda text: print(f"  {text}", file=sys.stderr, flush=True),
+            input_fn=lambda prompt: input(prompt),
+        )
+        try:
+            return agent_command(
+                env,
+                args.action,
+                args.words,
+                run_id=args.run,
+                limit=args.limit,
+                export=args.export,
+                erase=args.erase,
+                yes=args.yes,
+            )
+        except ConsoleError as exc:
+            raise CliError(str(exc)) from exc
+
+
 def _evaluation_inputs(args: argparse.Namespace, settings: Settings) -> tuple[int, int, int, float]:
     chunk_size = args.chunk_size or settings.chunk_size_chars
     chunk_overlap = (
@@ -1265,6 +1313,27 @@ def _build_parser() -> argparse.ArgumentParser:
     extract_command.add_argument(
         "--mode", choices=("vector", "keyword", "hybrid"), help="how notes are found"
     )
+    agent = add(
+        "agent",
+        _cmd_agent,
+        "let the assistant carry out a task by itself, within what you allow",
+    )
+    agent.add_argument(
+        "action",
+        choices=ACTIONS,
+        help="run a task; status; enable or disable the agent; allow or revoke a tool; "
+        "web on or off; log",
+    )
+    agent.add_argument(
+        "words",
+        nargs="*",
+        help="run: the task. allow, revoke: tool names. web: on or off",
+    )
+    agent.add_argument("--run", metavar="ID", help="log: show one run")
+    agent.add_argument("--limit", type=int, default=40, help="log: how many entries (default 40)")
+    agent.add_argument("--export", metavar="FILE", help="log: write every entry to a JSON file")
+    agent.add_argument("--erase", action="store_true", help="log: erase the whole log")
+    agent.add_argument("--yes", action="store_true", help="log --erase: do not ask to confirm")
     add("rechunk", _cmd_rechunk, "rebuild all chunks (after changing chunk settings)")
     index = add("index", _cmd_index, "embed documents that are not searchable yet")
     index.add_argument(
