@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.agent import audit
 from app.agent.permissions import Grants, load_grants, save_grants
 from app.agent.runs import RunManager
 from app.agent.tools import Param, Tool, ToolRegistry
@@ -484,3 +485,39 @@ def test_the_real_manager_offers_the_real_tools_and_the_search_only_loads_when_u
         "fetch_web_page",
     ]
     assert manager._load_grants() == Grants()  # noqa: SLF001
+
+
+def test_starting_the_agent_closes_the_tasks_a_crash_left_unfinished(
+    make_settings: Callable[..., Settings], session: Session
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.storage.models import AgentEvent
+
+    session.add(
+        AgentEvent(
+            run_id="left-over",
+            kind="run_started",
+            created_at=datetime.now(UTC) - timedelta(hours=2),
+        )
+    )
+    session.commit()
+
+    agent_module.build_manager(make_settings())
+
+    session.expire_all()
+    assert [e.kind for e in audit.run_events(session, "left-over")] == [
+        "run_started",
+        "run_finished",
+    ]
+
+
+def test_a_log_that_cannot_be_tidied_does_not_stop_the_agent_from_starting(
+    make_settings: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_session: Session) -> int:
+        raise RuntimeError("the log is locked")
+
+    monkeypatch.setattr(agent_module.audit, "close_unfinished_runs", broken)
+
+    assert isinstance(agent_module.build_manager(make_settings()), RunManager)

@@ -267,6 +267,7 @@ def _log(
         Path(export).write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
         env.emit(f"wrote {len(rows)} entries to {export}")
         return 0
+    audit.close_unfinished_runs(env.session)  # so the log never shows a dead task as running
     events = (
         audit.run_events(env.session, run_id)
         if run_id

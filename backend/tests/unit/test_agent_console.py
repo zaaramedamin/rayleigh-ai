@@ -509,3 +509,25 @@ def test_a_tool_error_from_the_search_is_passed_on_as_it_is() -> None:
 
     with pytest.raises(ToolError, match="download-model"):
         search("oats", 3)
+
+
+def test_reading_the_log_closes_the_tasks_a_crash_left_unfinished(
+    session: Session, tmp_path: Path
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.storage.models import AgentEvent
+
+    session.add(
+        AgentEvent(
+            run_id="left-over-run",
+            kind="run_started",
+            created_at=datetime.now(UTC) - timedelta(hours=2),
+        )
+    )
+    session.commit()
+    screen = Screen()
+
+    command(make_env(session, tmp_path, screen), "log")
+
+    assert any("run_finished" in line and "interrupted" in line for line in screen.lines)

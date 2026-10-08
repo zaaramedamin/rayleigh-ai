@@ -19,6 +19,7 @@ import logging
 import re
 import uuid
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, func, select
@@ -155,6 +156,36 @@ def all_events(session: Session, batch: int = 500) -> Iterator[AgentEvent]:
             return
         yield from rows
         last_id = rows[-1].id
+
+
+INTERRUPTED_DETAIL = "failed: interrupted (the program stopped before this task finished)"
+UNFINISHED_AFTER = timedelta(minutes=30)
+
+
+def close_unfinished_runs(session: Session, older_than: timedelta = UNFINISHED_AFTER) -> int:
+    """End the tasks the log shows as started and never finished, and say how many there were.
+
+    A task is left like that when the program stops under it (a crash, a restart, the computer
+    switched off). It is closed with an entry that says so, so the log never shows a task as still
+    running that is not. Only tasks that began more than `older_than` ago are touched, so a task
+    that is really running now, in another process, is left alone.
+    """
+    finished = select(AgentEvent.run_id).where(AgentEvent.kind == "run_finished")
+    rows = session.execute(
+        select(AgentEvent.run_id, func.min(AgentEvent.created_at))
+        .where(AgentEvent.kind == "run_started", AgentEvent.run_id.not_in(finished))
+        .group_by(AgentEvent.run_id)
+    ).all()
+    cutoff = datetime.now(UTC) - older_than
+    closed = 0
+    for run_id, started in rows:
+        when = started if started.tzinfo else started.replace(tzinfo=UTC)
+        if when < cutoff:
+            record(session, run_id, "run_finished", detail=INTERRUPTED_DETAIL)
+            closed += 1
+    if closed:
+        logger.info("agent tasks closed after an interruption count=%d", closed)
+    return closed
 
 
 def erase_log(session: Session) -> int:

@@ -4,6 +4,7 @@ Everything here sits behind the access password. Nothing the model writes can re
 question is answered only by a call to /answer, which is what a button in the interface does.
 """
 
+import logging
 import threading
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -29,6 +30,8 @@ from app.core.config import Settings
 from app.knowledge.components import create_llm, load_embedder
 from app.knowledge.retrieval.service import RetrievedChunk, retrieve
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 MAX_LOG_ENTRIES = 200
@@ -50,6 +53,11 @@ def build_manager(settings: Settings) -> RunManager:
         ):
             return retrieve(own, embedder, store, query, top_k=count, mode=settings.search_mode)
 
+    try:  # tasks the last run of the program left unfinished are closed in the log
+        with Session(_engine(settings.data_dir)) as session:
+            audit.close_unfinished_runs(session)
+    except Exception as exc:  # noqa: BLE001 - tidying the log must never stop the agent from starting
+        logger.warning("could not close unfinished agent tasks type=%s", type(exc).__name__)
     search = LazySearch(
         lambda: load_embedder(settings.embedding_model, settings.models_dir), retrieve_notes
     )

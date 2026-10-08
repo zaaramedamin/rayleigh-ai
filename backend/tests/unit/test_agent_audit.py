@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import update
@@ -10,10 +11,12 @@ from sqlalchemy.orm import Session
 
 from app.agent.audit import (
     HIDDEN,
+    INTERRUPTED_DETAIL,
     MAX_ARGUMENT_CHARS,
     MAX_DETAIL_CHARS,
     AuditError,
     all_events,
+    close_unfinished_runs,
     erase_log,
     new_run_id,
     recent_events,
@@ -235,3 +238,67 @@ def test_only_counts_reach_the_application_log(
 
 def test_the_free_text_is_listed_for_encryption() -> None:
     assert ("agent_events", "detail", "agent_events.detail") in ENCRYPTED_COLUMNS
+
+
+# --- tasks the program left unfinished --------------------------------------------------------
+
+
+def started(session: Session, run_id: str, ago: timedelta, *, finished: bool = False) -> None:
+    """A task as the log would hold it, begun `ago` ago."""
+    when = datetime.now(UTC) - ago
+    session.add(AgentEvent(run_id=run_id, kind="run_started", created_at=when))
+    if finished:
+        session.add(AgentEvent(run_id=run_id, kind="run_finished", created_at=when))
+    session.commit()
+
+
+def test_a_task_the_program_left_unfinished_is_closed_in_the_log(session: Session) -> None:
+    started(session, "old", timedelta(hours=3))
+
+    assert close_unfinished_runs(session) == 1
+
+    events = run_events(session, "old")
+    assert [e.kind for e in events] == ["run_started", "run_finished"]
+    assert events[-1].detail == INTERRUPTED_DETAIL and "interrupted" in INTERRUPTED_DETAIL
+
+
+def test_only_old_unfinished_tasks_are_touched(session: Session) -> None:
+    started(session, "finished-long-ago", timedelta(hours=5), finished=True)
+    started(session, "running-right-now", timedelta(minutes=2))
+    started(session, "stale-one", timedelta(hours=2))
+    started(session, "stale-two", timedelta(days=3))
+
+    assert close_unfinished_runs(session) == 2
+
+    assert [e.kind for e in run_events(session, "finished-long-ago")] == [
+        "run_started",
+        "run_finished",
+    ]
+    assert [e.kind for e in run_events(session, "running-right-now")] == ["run_started"]
+    for run_id in ("stale-one", "stale-two"):
+        assert [e.kind for e in run_events(session, run_id)] == ["run_started", "run_finished"]
+
+
+def test_closing_is_done_once_and_an_empty_log_is_fine(session: Session) -> None:
+    assert close_unfinished_runs(session) == 0
+    started(session, "old", timedelta(hours=3))
+
+    assert close_unfinished_runs(session) == 1
+    assert close_unfinished_runs(session) == 0
+    assert len(run_events(session, "old")) == 2
+
+
+def test_how_long_a_task_may_look_unfinished_can_be_chosen(session: Session) -> None:
+    started(session, "recent", timedelta(minutes=10))
+
+    assert close_unfinished_runs(session) == 0
+    assert close_unfinished_runs(session, older_than=timedelta(minutes=5)) == 1
+
+
+def test_closing_logs_only_a_count(session: Session, caplog: pytest.LogCaptureFixture) -> None:
+    started(session, "old", timedelta(hours=3))
+
+    with caplog.at_level(logging.DEBUG):
+        close_unfinished_runs(session)
+
+    assert "agent tasks closed after an interruption count=1" in caplog.text
