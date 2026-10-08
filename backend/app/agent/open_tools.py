@@ -31,6 +31,13 @@ BLOCKED_SUFFIXES = frozenset(
         ".inf", ".gadget", ".appx", ".msix", ".appinstaller", ".application", ".xbap",
         ".py", ".pyw", ".pyz", ".sh", ".iso", ".vhd", ".vhdx", ".settingcontent-ms",
         ".library-ms", ".search-ms", ".theme", ".diagcab", ".chm",
+        # Office files that carry macros, and add-ins that run code when opened.
+        ".docm", ".dotm", ".xlsm", ".xltm", ".xlam", ".xlsb", ".xll", ".wll", ".pptm", ".potm",
+        ".ppam", ".ppsm", ".sldm", ".iqy", ".slk", ".vsto", ".one", ".onepkg",
+        # Pages and images that run script in the browser, and remote connections.
+        ".html", ".htm", ".xhtml", ".shtml", ".mht", ".mhtml", ".svg", ".svgz", ".rdp", ".jnlp",
+        ".website", ".webloc", ".scf", ".psc1", ".msh", ".msh1", ".msh2", ".mshxml", ".ade",
+        ".adp", ".mde", ".mdb", ".accdb",
     }
 )  # fmt: skip
 

@@ -68,6 +68,56 @@ def test_a_program_or_script_is_never_opened(tmp_path: Path, opened: list[Path],
     assert opened == []
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "report.docm",
+        "sheet.XLSM",
+        "deck.pptm",
+        "addin.xll",
+        "page.html",
+        "page.HTM",
+        "pic.svg",
+        "a.mht",
+        "c.rdp",
+        "x.jnlp",
+        "n.one",
+    ],
+)
+def test_documents_with_macros_and_pages_that_run_script_are_not_opened(
+    tmp_path: Path, opened: list[Path], name: str
+) -> None:
+    (tmp_path / name).write_text("x")
+
+    with pytest.raises(ToolError, match="programs or scripts"):
+        open_path_tool(opened.append).run({"path": str(tmp_path / name)})
+    assert opened == []
+
+
+@pytest.mark.parametrize(
+    "trick",
+    ["setup.exe.", "setup.exe ", "setup.exe. ", "SETUP.EXE", "setup.exe::$DATA", "setup.exe\\"],
+)
+def test_windows_path_tricks_cannot_hide_a_program(
+    tmp_path: Path, opened: list[Path], trick: str
+) -> None:
+    (tmp_path / "setup.exe").write_text("x")
+
+    with pytest.raises(ToolError, match="programs or scripts"):
+        open_path_tool(opened.append).run({"path": str(tmp_path) + "\\" + trick})
+    assert opened == []
+
+
+def test_the_file_that_is_opened_is_the_checked_one_not_the_text_that_was_typed(
+    tmp_path: Path, opened: list[Path]
+) -> None:
+    (tmp_path / "notes.txt").write_text("x")
+
+    open_path_tool(opened.append).run({"path": str(tmp_path) + "\\notes.txt."})
+
+    assert opened == [(tmp_path / "notes.txt").resolve()]
+
+
 def test_a_file_with_no_type_is_not_opened(tmp_path: Path, opened: list[Path]) -> None:
     (tmp_path / "mystery").write_text("x")
 
