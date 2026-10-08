@@ -765,3 +765,44 @@ def test_a_long_run_keeps_working_inside_the_window(session: Session) -> None:
         assert system == AGENT.system
         assert messages[0].content == "do the task"
         assert len(system) + sum(len(m.content) + 200 for m in messages) <= 9000
+
+
+# --- progress -------------------------------------------------------------------------------
+
+
+def test_the_run_reports_what_it_is_doing_as_it_goes(session: Session) -> None:
+    said: list[str] = []
+    machine = Machine()
+    model = ScriptedModel(asks("open_thing", path="C:/x.txt"), says("Opened."))
+
+    go(session, model, machine, Owner(ALLOW), progress=said.append)
+
+    assert said == ["thinking ...", "running: Open C:/x.txt", "done: open_thing", "thinking ..."]
+
+
+def test_nothing_is_reported_for_a_request_that_is_refused_or_not_allowed(
+    session: Session,
+) -> None:
+    said: list[str] = []
+    model = ScriptedModel(asks("wipe"), asks("open_thing", path="C:/x.txt"), says("No."))
+
+    go(session, model, Machine(), Owner(DENY), progress=said.append)
+
+    assert not any(line.startswith(("running", "done")) for line in said)
+
+
+def test_a_display_that_fails_does_not_stop_the_run(
+    session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    def broken(_text: str) -> None:
+        raise OSError("the terminal went away: Quillon-Marmalade-4821")
+
+    machine = Machine()
+    model = ScriptedModel(asks("echo", word="hi"), says("Done anyway."))
+
+    with caplog.at_level(logging.DEBUG):
+        result = go(session, model, machine, progress=broken)
+
+    assert result.status == "done" and machine.did == [("echo", {"word": "hi"})]
+    assert "progress display failed type=OSError" in caplog.text
+    assert "Quillon-Marmalade-4821" not in caplog.text

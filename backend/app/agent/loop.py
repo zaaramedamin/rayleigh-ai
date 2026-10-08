@@ -150,6 +150,7 @@ class _Run:
         run_id: str,
         stop: threading.Event | None,
         clock: Callable[[], float],
+        progress: Callable[[str], None] | None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -160,6 +161,7 @@ class _Run:
         self.run_id = run_id
         self.stop = stop
         self.clock = clock
+        self.progress = progress
         self.started = clock()
         self.messages: list[ChatMessage] = []
         self.turns = 0
@@ -244,7 +246,17 @@ class _Run:
         tool = self.registry.get(name)
         return tool is not None and decide(tool, self.grants).decision != "deny"
 
+    def say(self, text: str) -> None:
+        """Tell whoever is watching what is happening. A watcher that fails changes nothing."""
+        if self.progress is None:
+            return
+        try:
+            self.progress(text)
+        except Exception as exc:  # noqa: BLE001 - a broken display must not stop the run
+            logger.warning("the agent's progress display failed type=%s", type(exc).__name__)
+
     def think(self) -> Any:
+        self.say("thinking ...")
         specs = self.offered()
         limit: int = getattr(self.llm, "input_chars", input_chars())
         room = limit - len(AGENT.system) - sum(_spec_chars(s) for s in specs)
@@ -350,6 +362,7 @@ class _Run:
                         "The owner did not allow this request. Do not ask for it again; "
                         "say what you could not do."
                     )
+            self.say(f"running: {effect}")
             try:
                 text = self.run_tool(tool, checked)
             except ToolError as exc:
@@ -370,6 +383,7 @@ class _Run:
                 "result", tool=tool.name, level=tool.level, detail=audit.summarize_result(capped)
             )
             self.steps.append(StepLog(tool.name, effect, "done"))
+            self.say(f"done: {tool.name}")
             self.failures = 0
             self.read_sources.append(tool.name)
             note = "\n(The result was cut: it was longer than the tool returns.)" if cut else ""
@@ -456,6 +470,7 @@ def run_agent(
     run_id: str | None = None,
     stop: threading.Event | None = None,
     clock: Callable[[], float] = time.monotonic,
+    progress: Callable[[str], None] | None = None,
 ) -> RunResult:
     """Carry out `goal`. Raises ValueError for an empty or too long goal.
 
@@ -477,6 +492,7 @@ def run_agent(
         run_id or audit.new_run_id(),
         stop,
         clock,
+        progress,
     )
     try:
         run.log("run_started", detail=audit.summarize_result(task))
