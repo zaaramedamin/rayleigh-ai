@@ -94,6 +94,12 @@ def test_one_key_or_word_answers_the_card(typed: str, expected: str) -> None:
     assert terminal.ask(APPROVE) == expected
 
 
+def test_an_invisible_byte_order_mark_before_the_answer_does_not_matter() -> None:
+    terminal, _, _ = approver("﻿a")
+
+    assert terminal.ask(APPROVE) == ALLOW
+
+
 def test_a_problem_card_offers_its_own_choices_and_nothing_else() -> None:
     terminal, shown, _ = approver("r")
 

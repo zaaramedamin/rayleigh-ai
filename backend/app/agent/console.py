@@ -107,7 +107,8 @@ class TerminalApprover:
         self._card(question)
         for _ in range(MAX_BAD_ANSWERS):
             try:
-                typed = self._input("> ").strip().lower()
+                # A pipe can put an invisible byte-order mark in front of the first answer.
+                typed = self._input("> ").lstrip("﻿").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 self._emit("(no answer: stopping)")
                 return STOP
