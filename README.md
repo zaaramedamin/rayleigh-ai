@@ -83,6 +83,7 @@ The `--constraint` matters: without it, `pip-compile` picks the newest version o
 | `summarize <document>` | A short summary of one document, by number or file name |
 | `compare <document> <document> ...` | What two to four documents have in common and where they differ, with sources |
 | `extract <what you want>` | A table of the facts your notes hold that match a request, each with its source (`--top-k`, `--type`, `--document`, `--mode`) |
+| `agent <action>` | Let the assistant carry out a task by itself, within what you allow: `run`, `status`, `enable`, `disable`, `allow`, `revoke`, `web`, `log` |
 | `check-llm` | Send a test prompt to the local LLM (Ollama) |
 | `eval` | Measure retrieval and answer quality on a built-in test set (`--answers`, `--chunk-size`, `--min-score`, `--output`) |
 | `offline-check` | Run the whole pipeline with all non-local network access blocked, and report any attempt |
@@ -180,6 +181,49 @@ In the interface, **Knowledge > Library > INSPECT** on a document has a **SUMMAR
 - **extract** searches your notes like `ask`, then asks the model for the facts as a table of rows (what, the value, which note). The application reads the table strictly and drops every row that names a note it was not given or is not a short fact; the sources are built from the database. If no note is relevant enough, the model is not called.
 
 All three work on the local model only, treat your notes as data and not as instructions, and are measured by `eval --answers` (see [Measuring quality](#measuring-quality)). Their instructions are kept in one place, `app/knowledge/answering/prompts.py`, each with a version and a fingerprint of its text: a test fails if a prompt changes without its version, and the evaluation report names the versions it ran with, so two reports can be compared knowing which prompts they used.
+
+### The agent: letting the assistant act
+
+The assistant can carry out a task by itself, by using tools: do a calculation, search your notes, open a file or a program, read a web page. **It is off until you switch it on, each tool is off until you switch it on, and anything that opens something or reaches the internet asks you first, every time.** The model is still the one on this computer; the only thing that can reach the internet is the web page tool, and only for an address you have just approved.
+
+Switch it on in the interface (Settings > AGENT) or from the command line:
+
+```powershell
+python -m app agent enable                     # the master switch; no tool is on yet
+python -m app agent allow calculator current_time search_notes open_path
+python -m app agent web on                     # only if you want it to read web pages
+python -m app agent allow fetch_web_page
+python -m app agent run what is 23 times 47, and open C:\Users\me\notes\plan.txt
+```
+
+| Tool | What it does | Asks you? |
+|---|---|---|
+| `calculator`, `current_time`, `search_notes` | Calculate exactly, tell the time, look in your notes | No, once switched on: they only read |
+| `open_path` | Open a file or folder with the program Windows already uses for it | **Every time**, showing the exact path |
+| `open_app` | Start Notepad, Calculator, Paint or File Explorer, alone | **Every time** |
+| `fetch_web_page` | Read the text of one public web page | **Every time**, showing the exact address, and only with the internet switch on |
+
+When the agent wants to do something that needs you, it stops and shows a card:
+
+```
+The agent wants your approval
+  Open C:\Users\me\notes\plan.txt with the program Windows uses for it
+  Exactly: path='C:\\Users\\me\\notes\\plan.txt'
+  Why you are asked: This opens something on your computer, so I need your approval each time.
+  [a] allow once   [d] do not allow   [s] stop the task
+```
+
+In the interface the card scrolls into view and a notice says the agent needs you. **Only you can answer it**: nothing the model writes can approve anything.
+
+**When something goes wrong, it asks you.** If a tool fails or takes too long, the model cannot be reached, it says nothing, it keeps making requests that cannot be carried out, or a limit is reached (8 steps or 5 minutes, which you can extend twice), the task stops and asks whether to try again, skip it or stop. It never retries behind your back.
+
+What it will **not** do, whatever it is told: delete or change anything, run commands or scripts, open programs or script and macro files (`.exe`, `.bat`, `.ps1`, `.lnk`, `.docm`, `.html`, ...), reach another computer, this computer's own services or your private network, log in anywhere, or act at all while the agent is switched off.
+
+Every request, including the ones that were refused, is written to a log (`python -m app agent log`, or Settings > AGENT > LOG): what was asked, what was decided and by whom. The log cannot be edited, only erased as a whole, and its text is encrypted with the rest of your library when you encrypt it.
+
+An honest note: the model is a small one. It can misunderstand a task, and a web page or a note it reads can try to steer it. That is why the cards exist: read what a card says before you press allow. [docs/security.md](docs/security.md) explains each safeguard, and what no safeguard can do for you.
+
+Over HTTP, behind the access password: `GET` and `PUT /api/v1/agent` (the switches), `POST /agent/runs` (start a task), `GET /agent/runs/{id}` (watch it and read its question), `POST /agent/runs/{id}/answer`, `POST /agent/runs/{id}/stop`, and `GET` and `DELETE /agent/log`.
 
 ### General chat
 
