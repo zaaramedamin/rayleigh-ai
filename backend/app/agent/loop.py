@@ -306,6 +306,17 @@ class _Run:
 
     # --- acting ------------------------------------------------------------------------------
 
+    def refuse(
+        self, tool: str, level: str | None, reason: str, effect: str, told_to_model: str
+    ) -> str:
+        """The application will not do this: log it, count it, and say why to the model."""
+        self.log(
+            "decision", tool=tool, level=level, decision="deny", decided_by="policy", detail=reason
+        )
+        self.failures += 1
+        self.steps.append(StepLog(tool, effect, "refused"))
+        return told_to_model
+
     def act(self, call: ToolCall) -> str:
         """Carry out one request for a tool. Returns what the model is told about it."""
         name = call.name[:40]
@@ -313,109 +324,120 @@ class _Run:
         self.log("request", tool=name, detail=audit.redact_arguments(arguments))
         tool = self.registry.get(call.name)
         if tool is None:
-            self.log(
-                "decision", tool=name, decision="deny", decided_by="policy", detail="no such tool"
-            )
-            self.failures += 1
-            self.steps.append(StepLog(name, "A tool that does not exist", "refused"))
             available = ", ".join(self.registry.names()) or "none"
-            return (
+            return self.refuse(
+                name,
+                None,
+                "no such tool",
+                "A tool that does not exist",
                 f"The application refused the request: there is no tool called {name!r}. "
-                f"The tools are: {available}."
+                f"The tools are: {available}.",
             )
         try:
             checked = validate_arguments(tool, arguments)
         except ArgumentError as exc:
-            self.log(
-                "decision",
-                tool=tool.name,
-                level=tool.level,
-                decision="deny",
-                decided_by="policy",
-                detail=str(exc),
+            return self.refuse(
+                tool.name,
+                tool.level,
+                str(exc),
+                tool.name,
+                f"The application refused the request: {exc}.",
             )
-            self.failures += 1
-            self.steps.append(StepLog(tool.name, tool.name, "refused"))
-            return f"The application refused the request: {exc}."
-
         effect = tool.effect(checked)
         while True:  # again only when the owner says "try again"
-            verdict = decide(tool, self.grants)
-            if verdict.decision == "deny":
-                self.log(
-                    "decision",
-                    tool=tool.name,
-                    level=tool.level,
-                    decision="deny",
-                    decided_by="policy",
-                    detail=verdict.reason,
-                )
-                self.failures += 1
-                self.steps.append(StepLog(tool.name, effect, "refused"))
-                return f"The application refused the request: {verdict.reason}"
-            self.log(
-                "decision",
-                tool=tool.name,
-                level=tool.level,
-                decision=verdict.decision,
-                decided_by="policy",
-                detail=verdict.reason,
+            told = self.attempt(tool, checked, effect)
+            if told is not None:
+                return told
+
+    def attempt(self, tool: Tool, checked: Mapping[str, Any], effect: str) -> str | None:
+        """One go at a valid request: the policy, the owner if needed, then the tool. Returns what
+        the model is told, or None when the owner chose to try again."""
+        verdict = decide(tool, self.grants)
+        if verdict.decision == "deny":
+            return self.refuse(
+                tool.name,
+                tool.level,
+                verdict.reason,
+                effect,
+                f"The application refused the request: {verdict.reason}",
             )
-            if verdict.decision == "ask":
-                question = Question(
-                    "approve",
-                    f"Allow {tool.name}?",
-                    effect,
-                    (ALLOW, DENY, STOP),
-                    tool=tool.name,
-                    arguments=checked,
-                    effect=effect,
-                    reason=verdict.reason,
-                    read_sources=tuple(dict.fromkeys(self.read_sources)),
-                )
-                answer = self.ask(question)
-                self.log(
-                    "approval",
-                    tool=tool.name,
-                    level=tool.level,
-                    decision="allow" if answer == ALLOW else "deny",
-                    decided_by="owner",
-                    detail=answer,
-                )
-                if answer == STOP:
-                    raise _Finish("stopped", "You stopped the task.")
-                if answer != ALLOW:
-                    self.steps.append(StepLog(tool.name, effect, "not allowed by you"))
-                    return (
-                        "The owner did not allow this request. Do not ask for it again; "
-                        "say what you could not do."
-                    )
-            self.say(f"running: {effect}")
-            try:
-                text = self.run_tool(tool, checked)
-            except ToolError as exc:
-                answer = self.problem(f"{tool.name} failed: {exc}", (RETRY, SKIP, STOP))
-                if answer == RETRY:
-                    continue
-                if answer == SKIP:
-                    self.steps.append(StepLog(tool.name, effect, "skipped"))
-                    return (
-                        f"The tool {tool.name} failed and the owner chose to skip it. "
-                        "Do not use it again for this."
-                    )
-                raise _Finish(
-                    "stopped", f"{tool.name} failed ({exc}) and you chose to stop."
-                ) from exc
-            capped, cut = cap_result(tool, text)
-            self.log(
-                "result", tool=tool.name, level=tool.level, detail=audit.summarize_result(capped)
+        self.log(
+            "decision",
+            tool=tool.name,
+            level=tool.level,
+            decision=verdict.decision,
+            decided_by="policy",
+            detail=verdict.reason,
+        )
+        if verdict.decision == "ask":
+            declined = self.approval(tool, checked, effect, verdict.reason)
+            if declined is not None:
+                return declined
+        self.say(f"running: {effect}")
+        try:
+            text = self.run_tool(tool, checked)
+        except ToolError as exc:
+            return self.failed(tool, effect, exc)
+        return self.finished(tool, effect, text)
+
+    def approval(
+        self, tool: Tool, checked: Mapping[str, Any], effect: str, reason: str
+    ) -> str | None:
+        """Ask the owner. None means allowed; otherwise what the model is told about the refusal.
+        Raises _Finish when the owner stops the task."""
+        question = Question(
+            "approve",
+            f"Allow {tool.name}?",
+            effect,
+            (ALLOW, DENY, STOP),
+            tool=tool.name,
+            arguments=checked,
+            effect=effect,
+            reason=reason,
+            read_sources=tuple(dict.fromkeys(self.read_sources)),
+        )
+        answer = self.ask(question)
+        self.log(
+            "approval",
+            tool=tool.name,
+            level=tool.level,
+            decision="allow" if answer == ALLOW else "deny",
+            decided_by="owner",
+            detail=answer,
+        )
+        if answer == STOP:
+            raise _Finish("stopped", "You stopped the task.")
+        if answer == ALLOW:
+            return None
+        self.steps.append(StepLog(tool.name, effect, "not allowed by you"))
+        return (
+            "The owner did not allow this request. Do not ask for it again; "
+            "say what you could not do."
+        )
+
+    def failed(self, tool: Tool, effect: str, error: ToolError) -> str | None:
+        """The tool could not do it: ask the owner what to do. None means try again."""
+        answer = self.problem(f"{tool.name} failed: {error}", (RETRY, SKIP, STOP))
+        if answer == RETRY:
+            return None
+        if answer == SKIP:
+            self.steps.append(StepLog(tool.name, effect, "skipped"))
+            return (
+                f"The tool {tool.name} failed and the owner chose to skip it. "
+                "Do not use it again for this."
             )
-            self.steps.append(StepLog(tool.name, effect, "done"))
-            self.say(f"done: {tool.name}")
-            self.failures = 0
-            self.read_sources.append(tool.name)
-            note = "\n(The result was cut: it was longer than the tool returns.)" if cut else ""
-            return fence_result(tool.name, capped + note, secrets.token_hex(8))
+        raise _Finish("stopped", f"{tool.name} failed ({error}) and you chose to stop.") from error
+
+    def finished(self, tool: Tool, effect: str, text: str) -> str:
+        """The tool did it: log a summary and give the model the result as fenced data."""
+        capped, cut = cap_result(tool, text)
+        self.log("result", tool=tool.name, level=tool.level, detail=audit.summarize_result(capped))
+        self.steps.append(StepLog(tool.name, effect, "done"))
+        self.say(f"done: {tool.name}")
+        self.failures = 0
+        self.read_sources.append(tool.name)
+        note = "\n(The result was cut: it was longer than the tool returns.)" if cut else ""
+        return fence_result(tool.name, capped + note, secrets.token_hex(8))
 
     def run_tool(self, tool: Tool, arguments: Mapping[str, Any]) -> str:
         """Run a tool with its own time limit. Raises ToolError for any failure."""
