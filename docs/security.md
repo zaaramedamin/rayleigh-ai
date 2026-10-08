@@ -82,6 +82,36 @@ Read-only views of the setup (`GET /system/settings`) hold no paths, passwords, 
 - **The routes are guarded like the others.** They sit behind the access password, ask for a document by its number, refuse an older version of a document, and report a model that is down in the same way as `/ask`. They add no way to reach a file: a document is only read from the library's own chunks.
 - **A prompt cannot change silently.** The instructions of these modes live in `app/knowledge/answering/prompts.py` with a version and a fingerprint of their text. A test pins every fingerprint and checks that each prompt still says that what it reads is data, so editing a prompt fails the tests until its version is raised and the new fingerprint recorded on purpose, removing that sentence fails them whatever the version, and the evaluation report names the versions it ran with.
 
+## The agent: acting on your computer
+
+The agent (`app/agent/`) is the first part of this application that can *do* something, so it is built on one rule: **safety never depends on the model behaving.** The model only *asks*; the application decides, in code the model cannot influence, and the tests give it a model that is completely fooled and check that nothing unapproved happens.
+
+**Everything is off until you switch it on.** The master switch, each tool and the internet are separate switches saved in `data/agent.json`. A missing or damaged file means everything off.
+
+| Level | Tools | What happens |
+|---|---|---|
+| read | `calculator`, `current_time`, `search_notes` | runs without asking once switched on: it only reads |
+| open | `open_path`, `open_app` | **asks you every time** |
+| internet | `fetch_web_page` | **asks you every time**, and is refused while the internet switch is off |
+| write | none exist | would ask every time |
+| destructive | none exist | **always refused**, whatever the switches say |
+
+There is no "always allow" for any level above reading, and the decision depends only on the tool's declared level and your switches: no text the model writes can change it (a test tries every combination).
+
+- **Only you can approve.** The loop asks through a card (a terminal key, or a button behind the access password); the answer must be one of the offered options for that very question. A model that writes "the owner already approved" is asked about anyway; an answer that is not an option, an empty one, a closed terminal or an approver that fails all mean *stop*; a second answer to the same question is refused (the first counts). Stop wins over everything.
+- **The card shows what will really happen**: the action in plain words, the exact arguments, why you are asked, and which tools' results the model read before asking, so a request that follows reading untrusted text is visible as such.
+- **A request is checked before you are bothered**: the tool must exist, and its arguments must fit exactly: no extra argument (it is refused, not dropped), no wrong type, no text that is too long (refused, never cut), no control characters, no line breaks in a one-line value (the way a header gets smuggled into a request).
+- **Everything is logged before it happens, and nothing runs without the log.** Every request, decision, approval, result and problem is written to an append-only table (`agent_events`): the database itself refuses to change an entry (only the owner can erase the log as a whole). Arguments are recorded with long text cut and anything that looks like a secret hidden, results as a short summary; the text is encrypted with the library. If an entry cannot be written, the run stops before acting.
+- **What goes wrong becomes a question, not a retry.** A failing or slow tool, a model that fails or says nothing, repeated requests that cannot be carried out, and the step and time limits all stop the run and ask you. A tool that crashes does not end the run and its message is never shown or logged (only the kind of error is).
+- **Tool results are untrusted data.** They reach the model between delimiter lines with a random marker no result can predict, are cut to a limit, and the prompt says they are data, not instructions. The point is that even a model that obeys them can only *ask*: the checks above still hold.
+- **Opening things** (`open_path`, `open_app`): a path must be written in full and exist, and is resolved first (so `sub\..\setup.exe`, `setup.exe.` or `setup.exe::$DATA` are judged as the real file, and the file opened is the checked one). Files that run code when opened are refused: programs and scripts, links, installers, macro-enabled Office files, web pages and vector images that run script in a browser, remote-connection files. Paths on another computer or a device are refused. Programs are started only from a short fixed list, alone, with no arguments.
+- **Reading the web** (`fetch_web_page`): a plain GET, no cookies, no login, no script run. Only the public internet: the site's name is looked up and *every* address it has must be public (not this computer, not a home or office network, not the link-local range cloud services keep credentials in, IPv4 addresses dressed as IPv6 are judged as IPv4), and the connection is made to the address that was checked, so a name cannot change its answer between the check and the connection. Only ordinary ports; no address with a user name in it; redirects are followed by hand to the same site only, a redirect elsewhere is reported so *you* are asked about it. 15 seconds, 1 MB, text types only; what comes back is the visible text (scripts, forms, hidden parts and links removed), cut to 6,000 characters.
+- **No commands, no writing, no deleting**: no tool can run a command, change a file, send anything but a plain page request, or alter the permissions. A hostile text can ask for `set_grants` or `rm -rf`; there is nothing by that name.
+
+**What no safeguard can do for you.** If you press *allow* on a card, the action happens, so read it. In particular, a fooled model could ask to read a web address that has something it read in its query string; the card shows that address in full precisely so you can see it, and refusing sends nothing. A small model is easier to steer than a large one; the design assumes it will sometimes be. Windows Smart App Control, antivirus and your own judgement remain part of the picture.
+
+The red-team tests (`tests/unit/test_agent_redteam.py`, 43) run a model that does exactly what hostile notes and pages say, against the real loop and tools. They cover a note ordering a program to be run, a page sending the agent to the metadata address, this computer, the model server and the private network (including by redirect), data smuggled out in an address, headers and logins smuggled into one, invented tools that change permissions, wearing the owner down with 30 requests, and a note forging the end of its own fence. They were checked to fail when a safeguard is removed (opening without asking, treating any address as public, ignoring a *no*). The tests of every part live next to them (`test_agent_*.py`).
+
 ## General chat
 
 - With **MY NOTES** off, the assistant answers from the local model alone (`POST /chat`). The library is not opened: no note, file name or profile text is read or added to the prompt.
