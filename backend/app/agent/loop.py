@@ -172,6 +172,7 @@ class _Run:
         self.extensions = 0
         self.read_sources: list[str] = []
         self.steps: list[StepLog] = []
+        self.closed = False  # the log has its run_finished entry
 
     # --- helpers ---------------------------------------------------------------------------
 
@@ -179,7 +180,10 @@ class _Run:
         audit.record(self.session, self.run_id, kind, step=self.turns, **fields)
 
     def ask(self, question: Question) -> str:
-        """Ask the owner. Anything but an offered option, or a failing approver, means stop."""
+        """Ask the owner. Anything but an offered option, or a failing approver, means stop. A task
+        that was stopped is never put to the owner: nobody is waiting for its question."""
+        if self.stop is not None and self.stop.is_set():
+            return STOP
         try:
             answer = self.approver.ask(question)
         except Exception:  # noqa: BLE001 - the approver is outside code; failing means stop
@@ -423,6 +427,9 @@ class _Run:
                 self.too_many_failures()
                 reply = self.think()
                 self.turns += 1
+                if self.stop is not None and self.stop.is_set():
+                    # Stopped while the model was thinking: what it asked for is not carried out.
+                    raise _Finish("stopped", "You stopped the task.")
                 if not reply.tool_calls:
                     text = reply.text.strip()
                     if not text:
@@ -455,6 +462,7 @@ class _Run:
             done = "; ".join(f"{s.effect}: {s.outcome}" for s in self.steps)
             message = f"{message} What happened before that: {done}."
         self.log("run_finished", detail=f"{status}: {audit.summarize_result(message)}")
+        self.closed = True
         return RunResult(self.run_id, status, message, self.turns, tuple(self.steps))
 
 
@@ -511,3 +519,11 @@ def run_agent(
             run.turns,
             tuple(run.steps),
         )
+    except BaseException as exc:
+        # Ctrl+C, or a bug: the task still ends in the log, so no task is left looking unfinished.
+        if not run.closed:
+            try:
+                run.log("run_finished", detail=f"failed: interrupted ({type(exc).__name__})")
+            except Exception:  # noqa: BLE001 - the log may be what broke; the original error matters more
+                logger.error("an agent task ended without its log entry")
+        raise

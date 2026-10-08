@@ -767,3 +767,94 @@ def test_a_display_that_fails_does_not_stop_the_run(
     assert result.status == "done" and machine.did == [("echo", {"word": "hi"})]
     assert "progress display failed type=OSError" in caplog.text
     assert "Quillon-Marmalade-4821" not in caplog.text
+
+
+# --- a task is always closed in the log, and a stopped task is never carried on ----------------
+
+
+class StopsWhileThinking(ScriptedModel):
+    """A model that is still thinking when the owner presses stop."""
+
+    def __init__(self, stop: threading.Event, *turns: Any) -> None:
+        super().__init__(*turns)
+        self.stop = stop
+
+    def chat(self, *args: Any, **kwargs: Any) -> ChatReply:
+        reply = super().chat(*args, **kwargs)
+        self.stop.set()  # stop is pressed while the reply was on its way
+        return reply
+
+
+def test_a_stop_pressed_while_the_model_thinks_means_what_it_asked_for_is_not_done(
+    session: Session,
+) -> None:
+    machine, stop = Machine(), threading.Event()
+    model = StopsWhileThinking(stop, asks("echo", word="hi"), says("never reached"))
+    owner = Owner()
+
+    result = go(session, model, machine, owner, stop=stop)
+
+    assert result.status == "stopped" and result.answer == "You stopped the task."
+    assert machine.did == [] and owner.questions == []
+    assert kinds(session, result.run_id) == ["run_started", "run_finished"]  # not even requested
+
+
+def test_a_stopped_task_never_puts_a_question_to_the_owner(session: Session) -> None:
+    class Asked(Owner):
+        def ask(self, question: Question) -> str:
+            raise AssertionError("a stopped task asked the owner something")
+
+    stop = threading.Event()
+    stop.set()
+    machine = Machine()
+    # Reach the approval step directly, as a task stopped at exactly that moment would.
+    from app.agent.loop import _Run
+
+    run = _Run(
+        ScriptedModel(),
+        machine.registry,
+        ALL_ON,
+        session,
+        Asked(),
+        Limits(),
+        "r",
+        stop,
+        time.monotonic,
+        None,
+    )
+
+    assert run.ask(Question("approve", "t", "m", (ALLOW, DENY, STOP))) == STOP
+
+
+def test_a_task_interrupted_with_ctrl_c_still_ends_in_the_log(session: Session) -> None:
+    class CtrlC(ScriptedModel):
+        def chat(self, *args: Any, **kwargs: Any) -> ChatReply:
+            raise KeyboardInterrupt
+
+    model = CtrlC()
+    run_id = "interrupted-run"
+
+    with pytest.raises(KeyboardInterrupt):
+        go(session, model, Machine(), run_id=run_id)
+
+    events = run_events(session, run_id)
+    assert [e.kind for e in events] == ["run_started", "run_finished"]
+    assert events[-1].detail == "failed: interrupted (KeyboardInterrupt)"
+
+
+def test_a_bug_in_the_model_layer_still_ends_the_task_in_the_log_and_is_not_hidden(
+    session: Session,
+) -> None:
+    model = ScriptedModel(ZeroDivisionError("boom"))
+
+    with pytest.raises(ZeroDivisionError):
+        go(session, model, Machine(), run_id="broken-run")
+
+    assert [e.kind for e in run_events(session, "broken-run")] == ["run_started", "run_finished"]
+    assert run_events(session, "broken-run")[-1].detail == "failed: interrupted (ZeroDivisionError)"
+
+
+def test_a_task_that_ended_normally_is_not_closed_twice(session: Session) -> None:
+    result = go(session, ScriptedModel(says("done")), Machine())
+
+    assert kinds(session, result.run_id).count("run_finished") == 1
