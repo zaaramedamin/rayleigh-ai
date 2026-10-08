@@ -169,6 +169,7 @@ class RunManager:
             if state is None or event is None or state.finished:
                 return False
             event.set()
+            state.progress.append("stopping ...")
             if state.pending is not None:
                 self._answers[run_id] = STOP
             self._changed.notify_all()
@@ -192,13 +193,16 @@ class RunManager:
         """Called by the loop: show the question and wait for the owner. Returns their choice."""
         with self._changed:
             state = self._runs[run_id]
+            stopped = self._stops[run_id]
+            if stopped.is_set():
+                return STOP  # nobody is waiting for the question of a task that was stopped
             question_id = self._next_question
             self._next_question += 1
             state.pending = Pending(question_id, question)
             state.status = "waiting"
             self._changed.notify_all()
             deadline = time.monotonic() + self._question_wait
-            while run_id not in self._answers:
+            while run_id not in self._answers and not stopped.is_set():
                 left = deadline - time.monotonic()
                 if left <= 0 or not self._changed.wait(timeout=left):
                     break
@@ -233,6 +237,7 @@ class RunManager:
         except Exception as exc:  # noqa: BLE001 - nothing may leave a run hanging
             logger.error("an agent run ended with an error type=%s", type(exc).__name__)
         with self._changed:
+            self._answers.pop(run_id, None)  # an answer nobody picked up must not outlive its task
             state.finished_at = datetime.now(UTC).isoformat()
             state.pending = None
             if result is None:

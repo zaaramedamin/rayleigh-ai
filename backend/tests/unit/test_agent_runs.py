@@ -428,3 +428,57 @@ def test_the_progress_shown_is_limited(
     done = finished(m, m.start("x").run_id)
 
     assert len(done.progress) == 3 and done.progress[-1] == "thinking ..."
+
+
+# --- a stop is never lost ------------------------------------------------------------------------
+
+
+def test_a_question_asked_after_a_stop_is_not_shown_and_does_not_wait(
+    make_session: Callable[[], Session],
+) -> None:
+    from app.agent.loop import Question
+
+    model = Waiting(says("never"))
+    m = manager(make_session, model)
+    run_id = m.start("x").run_id
+    assert model.asked.wait(5)
+    m.stop(run_id)  # stop arrives while the model is still thinking
+
+    started = time.monotonic()
+    answer = m._ask(run_id, Question("approve", "t", "m", (ALLOW, DENY, STOP)))  # noqa: SLF001
+
+    assert answer == STOP and time.monotonic() - started < 1  # not the fifteen minutes
+    state = m.get(run_id)
+    assert state is not None and state.pending is None and state.status == "running"
+    model.release.set()
+    assert finished(m, run_id).status == "stopped"
+
+
+def test_a_stop_is_shown_as_received_while_the_task_winds_down(
+    make_session: Callable[[], Session],
+) -> None:
+    model = Waiting(says("never"))
+    m = manager(make_session, model)
+    run_id = m.start("x").run_id
+    assert model.asked.wait(5)
+
+    m.stop(run_id)
+
+    state = m.get(run_id)
+    assert state is not None and state.progress[-1] == "stopping ..."
+    model.release.set()
+    assert finished(m, run_id).status == "stopped"
+
+
+def test_an_answer_nobody_picked_up_does_not_leak_into_the_next_task(
+    make_session: Callable[[], Session],
+) -> None:
+    things = Things()
+    m = manager(make_session, ScriptedModel(asks("open_thing", path="C:/x.txt")), things)
+    run_id = m.start("open it").run_id
+    state = waiting(m, run_id)
+    assert state.pending is not None
+    m.stop(run_id)
+    finished(m, run_id)
+
+    assert run_id not in m._answers  # noqa: SLF001
