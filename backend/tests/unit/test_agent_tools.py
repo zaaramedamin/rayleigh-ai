@@ -87,6 +87,23 @@ def test_a_wrongly_typed_or_out_of_range_value_is_refused_with_a_reason(
         validate_arguments(tool(x=param), {"x": value})
 
 
+@pytest.mark.parametrize(
+    "value", ["a\nb", "a\r\nX-Evil: 1", "a\tb", "https://example.com/\r\nHost: evil"]
+)
+def test_a_value_is_one_line_unless_the_tool_says_otherwise(value: str) -> None:
+    with pytest.raises(ArgumentError, match="must be on one line"):
+        validate_arguments(tool(x=Param("string", "t")), {"x": value})
+
+    wide = tool(x=Param("string", "t", multiline=True))
+    assert validate_arguments(wide, {"x": value}) == {"x": value.strip()}
+
+
+def test_line_breaks_around_a_value_are_trimmed_not_refused() -> None:
+    assert validate_arguments(tool(x=Param("string", "t")), {"x": "\n  hello \r\n"}) == {
+        "x": "hello"
+    }
+
+
 def test_a_long_text_is_refused_and_never_cut() -> None:
     demo = tool(text=Param("string", "words", max_length=10))
 

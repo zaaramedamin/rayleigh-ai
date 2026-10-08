@@ -32,6 +32,8 @@ DEFAULT_MAX_STRING_CHARS = 400
 DEFAULT_MAX_RESULT_CHARS = 4000
 _NAME = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Line breaks and tabs, which a one-line value (an address, a path, a sum) must never hold.
+_LINE_BREAK = re.compile(r"[\t\n\r]")
 
 
 class ToolError(Exception):
@@ -49,6 +51,7 @@ class Param:
     required: bool = True
     choices: tuple[str, ...] = ()  # strings only: the value must be one of these
     max_length: int = DEFAULT_MAX_STRING_CHARS  # strings only
+    multiline: bool = False  # strings only: may the text hold line breaks? Most values may not
     minimum: float | None = None  # numbers only
     maximum: float | None = None
 
@@ -97,6 +100,8 @@ def _check(tool: str, name: str, param: Param, value: Any) -> Any:
         text = value.strip()
         if _CONTROL.search(text):
             raise ArgumentError(f"{where} contains control characters")
+        if not param.multiline and _LINE_BREAK.search(text):
+            raise ArgumentError(f"{where} must be on one line")
         if not text:
             raise ArgumentError(f"{where} is empty")
         if len(text) > param.max_length:
