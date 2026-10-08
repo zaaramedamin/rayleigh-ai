@@ -22,6 +22,7 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -33,7 +34,8 @@ from app.agent.tools import Param, Tool, ToolError
 MAX_URL_CHARS = 500
 MAX_BODY_BYTES = 1_000_000
 MAX_REDIRECTS = 3
-TIMEOUT_SECONDS = 15.0
+TIMEOUT_SECONDS = 15.0  # for each wait: connecting, the first answer, the next piece
+TOTAL_SECONDS = 25.0  # for the whole page, however slowly the site sends it
 MAX_PAGE_CHARS = 6000
 USER_AGENT = "Reyleight-agent/1 (local assistant; text only)"
 TEXT_TYPES = (
@@ -150,7 +152,27 @@ class _PinnedTLS(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(raw, server_hostname=self.host)  # type: ignore[attr-defined]
 
 
+def _read_body(response: http.client.HTTPResponse, host: str, deadline: float) -> bytes:
+    """The start of the page, at most MAX_BODY_BYTES, within the deadline.
+
+    A site that sends one byte every few seconds never trips the time limit of a single wait, so
+    the time is checked between pieces as well.
+    """
+    pieces: list[bytes] = []
+    total = 0
+    while total <= MAX_BODY_BYTES:
+        if time.monotonic() > deadline:
+            raise ToolError(f"The site {host} is too slow: the page was not sent in time.")
+        piece = response.read1(65536)
+        if not piece:
+            break
+        pieces.append(piece)
+        total += len(piece)
+    return b"".join(pieces)[:MAX_BODY_BYTES]
+
+
 def real_requester(scheme: str, host: str, address: str, port: int, target: str) -> HttpResponse:
+    deadline = time.monotonic() + TOTAL_SECONDS
     connection: http.client.HTTPConnection = (
         _PinnedTLS(host, address, port, TIMEOUT_SECONDS)
         if scheme == "https"
@@ -169,9 +191,9 @@ def real_requester(scheme: str, host: str, address: str, port: int, target: str)
             },
         )
         response = connection.getresponse()
-        body = response.read(MAX_BODY_BYTES + 1)
+        body = _read_body(response, host, deadline)
         headers = {key.lower(): value for key, value in response.getheaders()}
-        return HttpResponse(response.status, headers, body[:MAX_BODY_BYTES])
+        return HttpResponse(response.status, headers, body)
     except ssl.SSLError as exc:
         raise ToolError(f"The site {host} has a certificate that cannot be trusted.") from exc
     except (OSError, http.client.HTTPException) as exc:

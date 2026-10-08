@@ -7,6 +7,7 @@ group of tests that talk to a small server on this computer to check the real co
 import http.server
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -438,6 +439,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         type(self).seen.append(
             {k.lower(): v for k, v in self.headers.items()} | {"path": self.path}
         )
+        if self.path == "/drip":
+            # A site that keeps the connection alive by sending one byte at a time.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            try:
+                for _ in range(60):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.25)
+            except OSError:
+                pass
+            return
         if self.path == "/big":
             body = b"x" * (MAX_BODY_BYTES + 5000)
         else:
@@ -527,3 +542,15 @@ def test_the_secure_connection_uses_the_default_certificate_checks() -> None:
     context = _PinnedTLS("example.com", PUBLIC, 443, 7.0)._context  # type: ignore[attr-defined]
 
     assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+
+
+def test_a_site_that_sends_the_page_one_byte_at_a_time_is_given_up_on(
+    local_server: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(web_tool, "TOTAL_SECONDS", 1.0)
+    started = time.monotonic()
+
+    with pytest.raises(ToolError, match="too slow"):
+        real_requester("http", "example.test", "127.0.0.1", local_server, "/drip")
+
+    assert time.monotonic() - started < 4  # the limit is on the whole page, not on each wait
