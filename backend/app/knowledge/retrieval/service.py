@@ -12,7 +12,6 @@ similarities, so they only decide the order, never whether a note is relevant en
 """
 
 import logging
-import math
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -99,12 +98,6 @@ def weighted_rank_fusion(rankings: Sequence[Sequence[tuple[Key, float]]]) -> lis
 def reciprocal_rank_fusion(rankings: Sequence[Sequence[Key]]) -> list[Key]:
     """Merge plain rankings (best first) with equal weight."""
     return weighted_rank_fusion([[(key, 1.0) for key in ranking] for ranking in rankings])
-
-
-def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
-    return dot / norm if norm else 0.0
 
 
 def retrieve(

@@ -10,7 +10,7 @@ from app.assistant.chat import (
     MAX_MESSAGE_CHARS,
     TEMPERATURE,
     AssistantContext,
-    build_messages,
+    clean_message,
     reply_to,
     select_history,
     system_prompt,
@@ -72,10 +72,10 @@ def test_an_empty_message_is_refused_before_the_model_is_called(message: str) ->
 
 
 def test_a_message_that_is_too_long_is_refused() -> None:
-    assert build_messages("x" * MAX_MESSAGE_CHARS)[-1].content == "x" * MAX_MESSAGE_CHARS
+    assert clean_message("x" * MAX_MESSAGE_CHARS) == "x" * MAX_MESSAGE_CHARS
 
     with pytest.raises(ValueError, match=f"longer than {MAX_MESSAGE_CHARS}"):
-        build_messages("x" * (MAX_MESSAGE_CHARS + 1))
+        clean_message("x" * (MAX_MESSAGE_CHARS + 1))
 
 
 def test_the_oldest_turns_are_dropped_when_the_conversation_is_too_long() -> None:
@@ -104,7 +104,7 @@ def test_what_is_kept_always_starts_with_something_the_user_said() -> None:
 
 def test_one_turn_bigger_than_the_whole_budget_leaves_no_history() -> None:
     assert select_history([_user("q"), _bot("a" * 500)], budget=100) == []
-    assert build_messages("hello", [_user("q" * 9000)]) == [_user("hello")]
+    assert select_history([_user("q" * 9000)]) == []
 
 
 def test_blank_turns_are_ignored_and_the_rest_is_trimmed() -> None:

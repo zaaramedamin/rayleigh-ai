@@ -180,11 +180,6 @@ def clean_message(message: str) -> str:
     return text
 
 
-def build_messages(message: str, history: Sequence[ChatMessage] = ()) -> list[ChatMessage]:
-    """The conversation to send: recent history, then the new message. Raises ValueError."""
-    return [*select_history(history), ChatMessage("user", clean_message(message))]
-
-
 def reply_to(
     llm: LLMProvider,
     message: str,
