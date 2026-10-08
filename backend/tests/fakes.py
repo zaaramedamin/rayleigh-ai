@@ -137,6 +137,14 @@ class ScriptedModel:
     def __init__(self, *turns: ChatReply | Exception) -> None:
         self.turns = list(turns)
         self.chats: list[tuple[str, list[ChatMessage], list[ToolSpec]]] = []
+        # What the model says when the agent first reads the request (see app.agent.understand),
+        # and what it was shown. Nothing scripted means a reply that cannot be read.
+        self.readings: list[str] = []
+        self.read: list[tuple[str, str]] = []
+
+    def generate(self, system: str, user: str) -> str:
+        self.read.append((system, user))
+        return self.readings.pop(0) if self.readings else ""
 
     def chat(
         self,

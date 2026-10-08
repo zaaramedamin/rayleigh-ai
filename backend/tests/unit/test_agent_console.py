@@ -546,3 +546,51 @@ def test_a_task_started_from_the_command_line_is_given_the_facts_about_the_compu
     assert model.chats[0][1][0].content == (
         "About this computer:\n- Home: C:/Users/me.\n\nThe user's request:\nopen my documents"
     )
+
+
+def test_a_task_from_the_command_line_is_read_first_when_asked(
+    session: Session, tmp_path: Path
+) -> None:
+    import json
+
+    switched_on(tmp_path)
+    model = ScriptedModel(says("Voilà."))
+    model.readings = [
+        json.dumps(
+            {"language": "French", "request": "Ouvre le Bloc-notes.", "clear": True, "question": ""}
+        )
+    ]
+    screen = Screen()
+    env = make_env(session, tmp_path, screen, model)
+    env.interpret = True
+
+    command(env, "run", "ouvre", "notpad")
+
+    assert "Understood as: Ouvre le Bloc-notes." in model.chats[0][1][0].content
+    assert "understood as: Ouvre le Bloc-notes." in screen.progress
+
+
+def test_an_unclear_task_from_the_command_line_shows_the_question_and_exits_cleanly(
+    session: Session, tmp_path: Path
+) -> None:
+    import json
+
+    switched_on(tmp_path)
+    model = ScriptedModel()
+    model.readings = [
+        json.dumps(
+            {
+                "language": "English",
+                "request": "Open it.",
+                "clear": False,
+                "question": "Which file?",
+            }
+        )
+    ]
+    screen = Screen()
+    env = make_env(session, tmp_path, screen, model)
+    env.interpret = True
+
+    code = command(env, "run", "open", "it")
+
+    assert code == 0 and "Which file?" in screen.lines and model.chats == []

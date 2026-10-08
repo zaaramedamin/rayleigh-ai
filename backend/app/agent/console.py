@@ -35,6 +35,7 @@ from app.agent.loop import (
 from app.agent.permissions import Grants, load_grants, save_grants
 from app.agent.registry import default_registry
 from app.agent.tools import ToolError, ToolRegistry
+from app.agent.understand import understand
 from app.ai.llm.base import LLMError, LLMProvider
 from app.knowledge.retrieval.service import RetrievedChunk
 
@@ -167,6 +168,7 @@ class Environment:
     progress: Callable[[str], None] | None = None
     input_fn: Callable[[str], str] = input
     context: Callable[[], str] | None = None  # the facts about this computer
+    interpret: bool = False  # read the request first
 
 
 def _registry(env: Environment) -> ToolRegistry:
@@ -320,6 +322,7 @@ def _run(env: Environment, words: list[str]) -> int:
             limits=Limits(),
             progress=env.progress,
             context=env.context() if env.context else "",
+            interpret=(lambda goal, facts: understand(llm, goal, facts)) if env.interpret else None,
         )
     except (ValueError, LLMError, AuditError) as exc:
         raise ConsoleError(str(exc)) from exc

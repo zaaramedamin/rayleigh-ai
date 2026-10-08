@@ -68,6 +68,7 @@ def build_manager(settings: Settings) -> RunManager:
         make_llm=lambda: create_llm(settings),
         make_registry=lambda: default_registry(search=search, min_score=settings.answer_min_score),
         load_grants=lambda: load_grants(settings.data_dir),
+        interpret=True,
         make_context=lambda: describe_computer(
             notes_folders=[folder.path for folder in allowed_folders(settings)]
         ),

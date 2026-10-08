@@ -498,3 +498,57 @@ def test_the_facts_about_the_computer_are_given_to_every_task(
 
     assert model.chats[0][1][0].content.endswith("The user's request:\nopen my downloads")
     assert "C:/D." in model.chats[0][1][0].content
+
+
+def test_a_task_is_read_first_when_the_manager_is_set_to_do_so(
+    make_session: Callable[[], Session],
+) -> None:
+    import json
+
+    model = ScriptedModel(says("Voilà."))
+    model.readings = [
+        json.dumps(
+            {"language": "French", "request": "Calcule 7 fois 8.", "clear": True, "question": ""}
+        )
+    ]
+    m = manager(make_session, model, interpret=True)
+
+    done = finished(m, m.start("calcul 7*8 stp").run_id)
+
+    assert "Understood as: Calcule 7 fois 8." in model.chats[0][1][0].content
+    assert "Write your reply in French." in model.chats[0][1][0].content
+    assert "understood as: Calcule 7 fois 8." in done.progress
+
+
+def test_an_unclear_task_ends_with_the_question_for_the_owner(
+    make_session: Callable[[], Session],
+) -> None:
+    import json
+
+    model = ScriptedModel()
+    model.readings = [
+        json.dumps(
+            {
+                "language": "English",
+                "request": "Open it.",
+                "clear": False,
+                "question": "Which file?",
+            }
+        )
+    ]
+    m = manager(make_session, model, interpret=True)
+
+    done = finished(m, m.start("open it").run_id)
+
+    assert (done.status, done.answer) == ("done", "Which file?") and model.chats == []
+
+
+def test_a_manager_that_was_not_asked_to_read_tasks_does_not(
+    make_session: Callable[[], Session],
+) -> None:
+    model = ScriptedModel(says("ok"))
+
+    m = manager(make_session, model)
+    finished(m, m.start("hello").run_id)
+
+    assert model.read == []

@@ -838,6 +838,7 @@ def _cmd_agent(args: argparse.Namespace, settings: Settings) -> int:
             min_score=settings.answer_min_score,
             progress=lambda text: print(f"  {text}", file=sys.stderr, flush=True),
             input_fn=lambda prompt: input(prompt),
+            interpret=True,
             context=lambda: describe_computer(
                 notes_folders=[folder.path for folder in allowed_folders(settings)]
             ),

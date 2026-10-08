@@ -534,3 +534,9 @@ def test_the_real_manager_tells_the_agent_where_the_notes_folders_are(
 
     assert f"- The user's notes are in: {notes}." in facts
     assert "never invent a path" in facts and "home folder is" in facts
+
+
+def test_the_real_manager_reads_every_task_first(make_settings: Callable[..., Settings]) -> None:
+    manager = agent_module.build_manager(make_settings())
+
+    assert manager._interpret is True  # noqa: SLF001 - checking what the wiring sets

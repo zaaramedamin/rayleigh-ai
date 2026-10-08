@@ -26,6 +26,7 @@ from app.agent import audit
 from app.agent.loop import STOP, Limits, Question, RunResult, StepLog, run_agent
 from app.agent.permissions import Grants
 from app.agent.tools import ToolRegistry
+from app.agent.understand import understand
 from app.ai.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ class RunManager:
         make_registry: Callable[[], ToolRegistry],
         load_grants: Callable[[], Grants],
         make_context: Callable[[], str] | None = None,
+        interpret: bool = False,
         limits: Limits | None = None,
         question_wait: float = QUESTION_WAIT_SECONDS,
     ) -> None:
@@ -87,6 +89,7 @@ class RunManager:
         self._make_registry = make_registry
         self._load_grants = load_grants
         self._make_context = make_context
+        self._interpret = interpret
         self._limits = limits
         self._question_wait = question_wait
         self._changed = threading.Condition()
@@ -224,8 +227,9 @@ class RunManager:
         result: RunResult | None = None
         try:
             with self._make_session() as session:
+                llm = self._make_llm()
                 result = run_agent(
-                    self._make_llm(),
+                    llm,
                     self._make_registry(),
                     self._load_grants(),
                     session,
@@ -236,6 +240,9 @@ class RunManager:
                     stop=self._stops[run_id],
                     progress=lambda text: self._say(run_id, text),
                     context=self._make_context() if self._make_context else "",
+                    interpret=(lambda goal, facts: understand(llm, goal, facts))
+                    if self._interpret
+                    else None,
                 )
         except Exception as exc:  # noqa: BLE001 - nothing may leave a run hanging
             logger.error("an agent run ended with an error type=%s", type(exc).__name__)

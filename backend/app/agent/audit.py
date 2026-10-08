@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 EVENT_KINDS = (
     "run_started",
+    "understood",
     "request",
     "decision",
     "approval",

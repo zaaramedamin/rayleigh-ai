@@ -43,6 +43,7 @@ from app.agent.tools import (
     fence_result,
     validate_arguments,
 )
+from app.agent.understand import Understanding
 from app.ai.llm.base import ChatMessage, LLMError, LLMProvider, ToolCall, ToolSpec
 from app.ai.llm.budget import FRAMING_CHARS, input_chars
 from app.knowledge.answering.prompts import AGENT
@@ -122,13 +123,24 @@ def _spec_chars(spec: ToolSpec) -> int:
     return len(spec.name) + len(spec.description) + len(json.dumps(spec.parameters))
 
 
-def first_message(goal: str, context: str = "") -> str:
+Interpreter = Callable[[str, str], Understanding | None]
+
+
+def first_message(goal: str, context: str = "", understood: Understanding | None = None) -> str:
     """What the model is first told: the facts it may use, then the request, last, so it is what the
-    model answers."""
+    model answers. When the request was read first, how it was understood and the language to
+    answer in come with it."""
     facts = context.strip()[:MAX_CONTEXT_CHARS]
-    if not facts:
+    if understood is not None:
+        request = (
+            f"The user's request, as typed:\n{goal}\n\nUnderstood as: {understood.request}\n\n"
+            f"Write your reply in {understood.language}."
+        )
+    elif facts:
+        request = f"The user's request:\n{goal}"
+    else:
         return goal
-    return f"{facts}\n\nThe user's request:\n{goal}"
+    return f"{facts}\n\n{request}" if facts else request
 
 
 def fit_messages(messages: Sequence[ChatMessage], room: int) -> list[ChatMessage]:
@@ -161,6 +173,7 @@ class _Run:
         stop: threading.Event | None,
         clock: Callable[[], float],
         progress: Callable[[str], None] | None,
+        interpret: Interpreter | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -172,6 +185,7 @@ class _Run:
         self.stop = stop
         self.clock = clock
         self.progress = progress
+        self.interpret = interpret
         self.started = clock()
         self.messages: list[ChatMessage] = []
         self.turns = 0
@@ -429,9 +443,30 @@ class _Run:
 
     # --- the run -----------------------------------------------------------------------------
 
+    def read_request(self, goal: str, context: str) -> Understanding | None:
+        """Say how the request was understood, or end the task with a question if something
+        essential is missing. A request that cannot be read is simply used as it was typed."""
+        if self.interpret is None:
+            return None
+        self.say("reading your request ...")
+        understood = self.interpret(goal, context)
+        if understood is None:
+            return None
+        self.log(
+            "understood",
+            detail=audit.summarize_result(f"{understood.language}: {understood.request}"),
+        )
+        self.say(f"understood as: {understood.request}")
+        if not understood.clear:
+            raise _Finish("done", understood.question)  # ask, do not guess
+        return understood
+
     def execute(self, goal: str, context: str = "") -> RunResult:
-        self.messages.append(ChatMessage("user", first_message(goal, context)))
         try:
+            if self.stop is not None and self.stop.is_set():
+                raise _Finish("stopped", "You stopped the task.")
+            understood = self.read_request(goal, context)
+            self.messages.append(ChatMessage("user", first_message(goal, context, understood)))
             while True:
                 self.check_limits()
                 self.too_many_failures()
@@ -490,6 +525,7 @@ def run_agent(
     clock: Callable[[], float] = time.monotonic,
     progress: Callable[[str], None] | None = None,
     context: str = "",
+    interpret: Interpreter | None = None,
 ) -> RunResult:
     """Carry out `goal`. Raises ValueError for an empty or too long goal.
 
@@ -512,6 +548,7 @@ def run_agent(
         stop,
         clock,
         progress,
+        interpret,
     )
     try:
         run.log("run_started", detail=audit.summarize_result(task))
