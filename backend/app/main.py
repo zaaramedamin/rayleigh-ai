@@ -8,6 +8,7 @@ from app import __version__
 from app.api.access import require_access
 from app.api.guard import LocalOnlyGuard
 from app.api.v1 import (
+    agent,
     ask,
     assistant,
     auth,
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
         feedback.router,
         system.router,
         tasks.router,
+        agent.router,
         library.router,
         profile.router,
         assistant.router,

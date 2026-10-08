@@ -44,7 +44,7 @@ ACTIONS = ("run", "status", "enable", "disable", "allow", "revoke", "web", "log"
 MAX_BAD_ANSWERS = 3
 LOG_LIST_LIMIT = 40
 
-_LEVEL_WORDS = {
+LEVEL_WORDS = {
     "read_local": "only reads",
     "open_local": "opens things, asks every time",
     "external_read": "reads the web, asks every time",
@@ -185,7 +185,7 @@ def _status(env: Environment) -> int:
         tool = registry.get(name)
         assert tool is not None
         state = "on " if name in grants.tools else "off"
-        env.emit(f"  {name:<16} {state}  {_LEVEL_WORDS[tool.level]}")
+        env.emit(f"  {name:<16} {state}  {LEVEL_WORDS[tool.level]}")
     if not grants.enabled:
         env.emit("The agent does nothing until you run `python -m app agent enable`.")
     return 0
@@ -230,7 +230,7 @@ def _allow(env: Environment, names: list[str], on: bool) -> int:
     for name in chosen:
         tool = registry.get(name)
         assert tool is not None
-        env.emit(f"{name}: {'on' if on else 'off'} ({_LEVEL_WORDS[tool.level]})")
+        env.emit(f"{name}: {'on' if on else 'off'} ({LEVEL_WORDS[tool.level]})")
         if on and tool.level == "external_read" and not grants.web:
             env.emit("  it also needs `python -m app agent web on`.")
     if on and not grants.enabled:
