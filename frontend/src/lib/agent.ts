@@ -20,6 +20,19 @@ export function choiceTone(choice: string): "go" | "safe" {
   return choice === "allow" || choice === "retry" || choice === "continue" ? "go" : "safe";
 }
 
+/** The task as the screen shows it once the server no longer knows it (the server was restarted). */
+export function lostRun(run: AgentRun): AgentRun {
+  return {
+    ...run,
+    status: "failed",
+    question: null,
+    finished_at: run.finished_at ?? new Date().toISOString(),
+    answer:
+      "The server no longer knows this task (it was probably restarted), so nothing more will happen. " +
+      "Nothing was done that you did not approve. You can start it again.",
+  };
+}
+
 const STATUS: Record<AgentRunStatus, string> = {
   running: "WORKING",
   waiting: "WAITING FOR YOU",

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ApiError } from "../api/client";
 import type { AgentEvent, AgentRun, AgentSettings, AgentSettingsChange, Api } from "../api/types";
-import { isActive } from "../lib/agent";
+import { isActive, lostRun } from "../lib/agent";
 import { events } from "./events";
 
 const message = (error: unknown, fallback: string) => (error instanceof Error ? error.message : fallback);
@@ -55,7 +56,10 @@ export function useAgent(api: Api, pollMs = 800) {
         const latest = await api.agentRun(activeId);
         if (!cancelled) setRun(latest);
       } catch (err) {
-        if (!cancelled) setError(message(err, "Lost track of the task."));
+        if (cancelled) return;
+        // The server forgot the task (it restarted): stop asking about it instead of asking for ever.
+        if (err instanceof ApiError && err.kind === "not_found") setRun((current) => (current ? lostRun(current) : current));
+        else setError(message(err, "Lost track of the task."));
       }
     }, pollMs);
     return () => {

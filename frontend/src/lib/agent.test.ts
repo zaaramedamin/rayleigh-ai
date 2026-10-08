@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { argumentLines, choiceLabel, choiceTone, eventLine, isActive, levelLabel, readWarning, statusLabel } from "./agent";
+import type { AgentRun } from "../api/types";
+import { argumentLines, choiceLabel, choiceTone, eventLine, isActive, levelLabel, lostRun, readWarning, statusLabel } from "./agent";
 
 describe("choiceLabel", () => {
   it("names every answer the agent can ask for", () => {
@@ -100,3 +101,53 @@ describe("eventLine", () => {
     expect(eventLine({ ...base, time: "not a time" })).toMatch(/^not a time {2}decision/);
   });
 });
+
+describe("lostRun", () => {
+  const waiting: AgentRun = {
+    run_id: "abc",
+    task: "open my plan",
+    status: "waiting",
+    answer: "",
+    started_at: "2026-10-08T12:00:00Z",
+    finished_at: null,
+    progress: ["thinking ..."],
+    question: {
+      id: 3,
+      kind: "approve",
+      title: "Allow open_path?",
+      message: "Open C:/x.txt",
+      options: ["allow", "deny", "stop"],
+      tool: "open_path",
+      arguments: { path: "C:/x.txt" },
+      effect: "Open C:/x.txt",
+      reason: "ask",
+      read_sources: [],
+    },
+    steps: [{ tool: "echo", effect: "echo(word='a')", outcome: "done" }],
+    model_turns: 2,
+  };
+
+  it("turns a task the server forgot into a finished, failed one with no question to answer", () => {
+    const lost = lostRun(waiting);
+
+    expect(lost.status).toBe("failed");
+    expect(isActive(lost)).toBe(false);
+    expect(lost.question).toBeNull();
+    expect(lost.finished_at).not.toBeNull();
+  });
+
+  it("says what happened and that nothing unapproved was done, and keeps what was known", () => {
+    const lost = lostRun(waiting);
+
+    expect(lost.answer).toContain("no longer knows this task");
+    expect(lost.answer).toContain("Nothing was done that you did not approve");
+    expect(lost.task).toBe("open my plan");
+    expect(lost.steps).toEqual(waiting.steps);
+    expect(lost.run_id).toBe("abc");
+  });
+
+  it("keeps the finish time a task already had", () => {
+    expect(lostRun({ ...waiting, finished_at: "2026-10-08T12:30:00Z" }).finished_at).toBe("2026-10-08T12:30:00Z");
+  });
+});
+
