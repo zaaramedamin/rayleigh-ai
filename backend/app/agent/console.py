@@ -124,15 +124,15 @@ class TerminalApprover:
 
 class LazySearch:
     """The library's search for the agent. The embedding model is loaded the first time a search is
-    asked for, so a task that never searches never needs it."""
+    asked for, so a task that never searches never needs it. `retrieve_notes` opens whatever it
+    needs (a database session, the search index) and closes it again: a tool runs in its own
+    thread, so it must not share a session with the loop."""
 
     def __init__(
         self,
-        session: Session,
         load_embedder: Callable[[], Any],
         retrieve_notes: Callable[[Any, str, int], list[RetrievedChunk]],
     ) -> None:
-        self._session = session
         self._load = load_embedder
         self._retrieve = retrieve_notes
         self._embedder: Any = None

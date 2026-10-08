@@ -462,7 +462,7 @@ def test_erasing_with_yes_does_not_ask(session: Session, tmp_path: Path) -> None
 
 def test_the_embedding_model_is_not_loaded_until_the_agent_searches() -> None:
     loads: list[int] = []
-    search = LazySearch(None, lambda: loads.append(1) or "embedder", lambda e, q, n: [])  # type: ignore[arg-type, func-returns-value]
+    search = LazySearch(lambda: loads.append(1) or "embedder", lambda e, q, n: [])  # type: ignore[func-returns-value]
 
     assert loads == []
     search("oats", 3)
@@ -472,7 +472,7 @@ def test_the_embedding_model_is_not_loaded_until_the_agent_searches() -> None:
 
 def test_the_search_passes_the_query_and_count_to_the_retrieval() -> None:
     seen: list[tuple[Any, str, int]] = []
-    search = LazySearch(None, lambda: "the-embedder", lambda e, q, n: seen.append((e, q, n)) or [])  # type: ignore[arg-type, func-returns-value]
+    search = LazySearch(lambda: "the-embedder", lambda e, q, n: seen.append((e, q, n)) or [])  # type: ignore[func-returns-value]
 
     search("oats", 3)
 
@@ -485,7 +485,7 @@ def test_a_search_that_fails_becomes_a_tool_error_with_a_pointer_and_no_trace(
     def load() -> Any:
         raise OSError("a program blocked by policy")
 
-    search = LazySearch(None, load, lambda e, q, n: [])  # type: ignore[arg-type]
+    search = LazySearch(load, lambda e, q, n: [])
 
     with (
         caplog.at_level(logging.DEBUG),
@@ -499,7 +499,7 @@ def test_a_tool_error_from_the_search_is_passed_on_as_it_is() -> None:
     def load() -> Any:
         raise ToolError("The embedding model is missing: run `python -m app download-model`.")
 
-    search = LazySearch(None, load, lambda e, q, n: [])  # type: ignore[arg-type]
+    search = LazySearch(load, lambda e, q, n: [])
 
     with pytest.raises(ToolError, match="download-model"):
         search("oats", 3)
