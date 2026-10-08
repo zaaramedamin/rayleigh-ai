@@ -3,7 +3,7 @@
 import logging
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -25,50 +25,11 @@ from app.agent.loop import (
 )
 from app.agent.permissions import Grants
 from app.agent.tools import Param, Tool, ToolError, ToolRegistry
-from app.ai.llm.base import (
-    ChatMessage,
-    ChatReply,
-    LLMUnavailableError,
-    ToolCall,
-    ToolSpec,
-)
+from app.ai.llm.base import ChatMessage, ChatReply, LLMUnavailableError, ToolCall
 from app.knowledge.answering.prompts import AGENT
+from tests.fakes import ScriptedModel, asks, says
 
 # --- stand-ins ---------------------------------------------------------------------------------
-
-
-class ScriptedModel:
-    """A model that does what the test says, one turn at a time, and remembers what it was given."""
-
-    model_name = "test/scripted"
-
-    def __init__(self, *turns: ChatReply | Exception) -> None:
-        self.turns = list(turns)
-        self.chats: list[tuple[str, list[ChatMessage], list[ToolSpec]]] = []
-
-    def chat(
-        self,
-        system: str,
-        messages: Sequence[ChatMessage],
-        *,
-        temperature: float = 0.0,
-        tools: Sequence[ToolSpec] = (),
-    ) -> ChatReply:
-        self.chats.append((system, list(messages), list(tools)))
-        if not self.turns:
-            raise AssertionError("the model was asked for more turns than the test scripted")
-        turn = self.turns.pop(0)
-        if isinstance(turn, Exception):
-            raise turn
-        return turn
-
-
-def says(text: str) -> ChatReply:
-    return ChatReply(text=text)
-
-
-def asks(name: str, **arguments: Any) -> ChatReply:
-    return ChatReply(text="", tool_calls=(ToolCall(name, arguments),))
 
 
 class Owner:
