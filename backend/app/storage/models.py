@@ -1,6 +1,15 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    DDL,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    event,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.security.sqlalchemy_types import EncryptedString, EncryptedText
@@ -235,3 +244,39 @@ class Feedback(Base):
         DateTime(timezone=True), default=_utcnow, index=True
     )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+# What the agent did or was asked to do. Rows are never edited: the database refuses any change to
+# the facts of a row (the free text in `detail` is the one column that may be rewritten, because
+# encrypting a library rewrites it in place). The owner can erase the whole log, never alter it.
+AGENT_EVENTS_NO_UPDATE = DDL(  # type: ignore[no-untyped-call]
+    "CREATE TRIGGER IF NOT EXISTS agent_events_no_update "
+    "BEFORE UPDATE OF created_at, run_id, step, kind, tool, level, decision, "
+    "decided_by ON agent_events "
+    "BEGIN SELECT RAISE(ABORT, 'the agent log cannot be changed'); END"
+)
+
+
+class AgentEvent(Base):
+    """One entry in the agent's audit log: a task started, a tool requested, a decision, an
+    approval, a result, a problem. `detail` holds redacted arguments or a short summary, never the
+    full text of a private document."""
+
+    __tablename__ = "agent_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+    run_id: Mapped[str] = mapped_column(String(36), index=True)
+    step: Mapped[int] = mapped_column(Integer, default=0)
+    # run_started, request, decision, approval, result, problem or run_finished.
+    kind: Mapped[str] = mapped_column(String(20))
+    tool: Mapped[str | None] = mapped_column(String(40), default=None)
+    level: Mapped[str | None] = mapped_column(String(20), default=None)
+    decision: Mapped[str | None] = mapped_column(String(10), default=None)  # allow, ask or deny
+    decided_by: Mapped[str | None] = mapped_column(String(10), default=None)  # policy or owner
+    detail: Mapped[str | None] = mapped_column(EncryptedText("agent_events.detail"), default=None)
+
+
+event.listen(AgentEvent.__table__, "after_create", AGENT_EVENTS_NO_UPDATE)

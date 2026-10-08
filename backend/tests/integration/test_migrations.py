@@ -317,3 +317,66 @@ def test_the_feedback_table_is_created_empty_and_removed_again(tmp_path: Path) -
 
     command.downgrade(config, "0009")
     assert "feedback" not in _tables(db_path)
+
+
+def test_the_agent_log_table_is_created_append_only_and_removed_again(tmp_path: Path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "test.db"
+    config = _config(db_path)
+    command.upgrade(config, "0010")
+    assert "agent_events" not in _tables(db_path)
+
+    command.upgrade(config, "0011")
+    assert _columns(db_path, "agent_events") == {
+        "id",
+        "created_at",
+        "run_id",
+        "step",
+        "kind",
+        "tool",
+        "level",
+        "decision",
+        "decided_by",
+        "detail",
+    }
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "INSERT INTO agent_events (created_at, run_id, step, kind, tool, level, decision, "
+        "decided_by, detail) VALUES ('2026-10-08 00:00:00', 'run-1', 1, 'request', 'open_path', "
+        "'open_local', 'ask', 'policy', '{}')"
+    )
+    connection.commit()
+
+    # The facts of a row cannot be edited, whichever column is aimed at...
+    for column, value in (
+        ("decision", "allow"),
+        ("tool", "calculator"),
+        ("kind", "result"),
+        ("decided_by", "owner"),
+        ("created_at", "2020-01-01 00:00:00"),
+    ):
+        try:
+            connection.execute(f"UPDATE agent_events SET {column} = ?", (value,))  # noqa: S608
+            raise AssertionError(f"{column} could be changed")
+        except sqlite3.DatabaseError as exc:
+            assert "cannot be changed" in str(exc)
+    # ...but the text can be rewritten (encrypting a library does that), and the log erased.
+    connection.execute("UPDATE agent_events SET detail = 'rewritten'")
+    assert connection.execute("SELECT detail, decision FROM agent_events").fetchone() == (
+        "rewritten",
+        "ask",
+    )
+    connection.execute("DELETE FROM agent_events")
+    connection.commit()
+    assert connection.execute("SELECT COUNT(*) FROM agent_events").fetchone() == (0,)
+    connection.close()
+
+    command.downgrade(config, "0010")
+    assert "agent_events" not in _tables(db_path)
+    connection = sqlite3.connect(db_path)
+    triggers = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+    ).fetchall()
+    connection.close()
+    assert triggers == []

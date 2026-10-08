@@ -47,6 +47,7 @@ ENCRYPTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("feedback", "answer", "feedback.answer"),
     ("feedback", "note", "feedback.note"),
     ("feedback", "details", "feedback.details"),
+    ("agent_events", "detail", "agent_events.detail"),
 )
 
 Progress = Callable[[str], None]
