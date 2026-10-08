@@ -17,7 +17,8 @@ PINNED = {
     "combine": (1, "b322afcb5b"),
     "compare": (1, "f2e9eb65a3"),
     "extract": (1, "883487bed8"),
-    "agent": (1, "63a4427581"),
+    "agent": (2, "798a9f05ad"),
+    "interpret": (1, "c48a11ae24"),
 }
 
 

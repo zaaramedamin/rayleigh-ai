@@ -115,7 +115,8 @@ def open_path_tool(opener: Opener = _real_opener) -> Tool:
         params={
             "path": Param(
                 "string",
-                "The full path, such as C:\\Users\\me\\notes\\plan.txt.",
+                "The full path, starting with the drive letter, taken from the facts you were "
+                "given or from what the user wrote. Never a path you made up.",
                 max_length=MAX_PATH_CHARS,
             )
         },
