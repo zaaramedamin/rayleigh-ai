@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import type { Api } from "../api/types";
 import { speech, useVoices } from "../audio/speech";
+import { AgentPanel } from "../components/AgentPanel";
 import { HudFrame } from "../components/HudFrame";
 import { events } from "../state/events";
 import type { Level } from "../state/events";
@@ -187,6 +188,9 @@ export function SettingsView({ api, onPasswordChanged }: Props) {
           chosen, because they would send what the assistant says to that service. Your own voice is turned into text
           by a speech model on this computer (download it once with <code>python -m app download-voice-model</code>).
         </p>
+      </HudFrame>
+      <HudFrame title="AGENT" tag="ACTS ON YOUR COMPUTER">
+        <AgentPanel api={api} />
       </HudFrame>
       <HudFrame title="ALERTS AND SOUNDS" tag="PREVIEW">
         <p className="muted">Try each kind of notice. Sound needs interface sounds switched on above.</p>
